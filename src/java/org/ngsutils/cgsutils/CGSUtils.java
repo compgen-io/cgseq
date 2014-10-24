@@ -163,6 +163,9 @@ public class CGSUtils {
 			} catch (ArgumentValidationException e) {
 				System.err.println(e.getMessage());
 				showHelp(execs.get(args[0]));
+			} catch (Throwable t) {
+				t.printStackTrace(System.err);
+				System.exit(1);
 			}
 		} else {
 			usage("Unknown command: " + args[0]);
