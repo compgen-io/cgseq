@@ -1,4 +1,4 @@
-package org.ngsutils.cgsutils;
+package io.compgen.cgseq;
 
 public class CGSUtilsException extends Exception {
 

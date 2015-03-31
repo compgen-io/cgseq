@@ -1,31 +1,30 @@
-package org.ngsutils.cgsutils.cli.copynumber;
+package io.compgen.cgseq.cli.copynumber;
+
+import io.compgen.cgseq.CGSeq;
+import io.compgen.cmdline.annotation.Command;
+import io.compgen.cmdline.annotation.Exec;
+import io.compgen.cmdline.annotation.Option;
+import io.compgen.cmdline.exceptions.CommandArgumentException;
+import io.compgen.cmdline.impl.AbstractOutputCommand;
+import io.compgen.common.StringLineReader;
+import io.compgen.common.StringUtils;
+import io.compgen.common.TabWriter;
+import io.compgen.ngsutils.annotation.GenomeSpan;
+import io.compgen.ngsutils.pileup.PileupReader;
+import io.compgen.ngsutils.pileup.PileupRecord;
+import io.compgen.ngsutils.support.stats.StatUtils;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.ngsutils.annotation.GenomeRegion;
-import org.ngsutils.cgsutils.CGSUtils;
-import org.ngsutils.cgsutils.support.pileup.PileupReader;
-import org.ngsutils.cgsutils.support.pileup.PileupRecord;
-import org.ngsutils.cli.AbstractOutputCommand;
-import org.ngsutils.cli.Command;
-import org.ngsutils.support.ListUtils;
-import org.ngsutils.support.StringLineReader;
-import org.ngsutils.support.StringUtils;
-import org.ngsutils.support.TabWriter;
-import org.ngsutils.support.stats.StatUtils;
-
-import com.lexicalscope.jewel.cli.ArgumentValidationException;
-import com.lexicalscope.jewel.cli.CommandLineInterface;
-import com.lexicalscope.jewel.cli.Option;
-
-@CommandLineInterface(application="cgsutils copynumber")
 @Command(name="copynumber", 
 		 desc="Find the overall copy-number for the tumor sample across the a region (mpileup input, NT).", 
-		 cat="copy-number", 
+		 category="copy-number", 
 		 doc="You can use either mpileup as an input or BAM files. If you use mpileup (Normal/Tumor order),\n"
 		 		+ "then the copy-number will be calculated across the whole mpileup region. Otherwise, you\n"
 		 		+ "can also use normal and tumor BAM files with a BED file to define the regions used to\n"
@@ -64,36 +63,36 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 	private int normalTotal = -1;
 	private int tumorTotal = -1;
 
-    @Option(description="Normal BAM file", longName="norm", defaultToNull=true)
+    @Option(desc="Normal BAM file", name="norm")
     public void setNormalFilename(String filename) {
     	this.normalFilename = filename;
     }
 
-    @Option(description="Tumor BAM file", longName="tumor", defaultToNull=true)
+    @Option(desc="Tumor BAM file", name="tumor")
     public void setTumorFilename(String filename) {
     	this.tumorFilename = filename;
     }
     
-    @Option(description="Regions BED file", longName="bed", defaultToNull=true)
+    @Option(desc="Regions BED file", name="bed")
     public void setBEDFilename(String filename) {
     	this.bedFilename = filename;
     }
-    @Option(description="Region to find copy-number for (using BAM files)", longName="region", defaultToNull=true)
+    @Option(desc="Region to find copy-number for (using BAM files)", name="region")
     public void setRegion(String region) {
     	this.region = region;
     }
     
-    @Option(description="Normal total read count (optional)", longName="norm-total", defaultValue="-1")
+    @Option(desc="Normal total read count (optional)", name="norm-total", defaultValue="-1")
     public void setNormalTotal(int count) {
     	this.normalTotal = count;
     }
 
-    @Option(description="Tumor total read count (optional)", longName="tumor-total", defaultValue="-1")
+    @Option(desc="Tumor total read count (optional)", name="tumor-total", defaultValue="-1")
     public void setTumorTotal(int count) {
         	this.tumorTotal = count;
     }
 
-    @Option(description="Pileup file", longName="pileup", defaultToNull=true)
+    @Option(desc="Pileup file", name="pileup")
     public void setPileupFilename(String pileupFilename) {
         this.pileupFilename = pileupFilename;
     }
@@ -105,15 +104,15 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		return Math.log(d) / Math.log(2);
 	}
 	
-	@Override
+	@Exec
 	public void exec() throws Exception {
 		if (pileupFilename == null && (tumorFilename == null || normalFilename == null || (region == null && bedFilename == null))) {
-			throw new ArgumentValidationException("You must specify either an mpileup file (or stdin), or a normal BAM file, a tumor BAM file, and a region/BED file!");
+			throw new CommandArgumentException("You must specify either an mpileup file (or stdin), or a normal BAM file, a tumor BAM file, and a region/BED file!");
 		}
 		
 		TabWriter writer = new TabWriter(out);
-        writer.write_line("## program: " + CGSUtils.getVersion());
-        writer.write_line("## cmd: " + CGSUtils.getArgs());
+        writer.write_line("## program: " + CGSeq.getVersion());
+        writer.write_line("## cmd: " + CGSeq.getArgs());
 		if (pileupFilename != null) {
 			writer.write_line("## pileup-input: " + pileupFilename);
 		} else {
@@ -121,20 +120,24 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			writer.write_line("## normal: " + normalFilename);
 			writer.write_line("## tumor: " + tumorFilename);
 		}
-        writer.write_line("## tumor-total: " + tumorTotal);
-        writer.write_line("## normal-total: " + normalTotal);
+		if (tumorTotal > 0 && normalTotal > 0) {
+	        writer.write_line("## tumor-total: " + tumorTotal);
+	        writer.write_line("## normal-total: " + normalTotal);
+		}
 		
 		if (pileupFilename != null) {
 			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number");
 			writer.eol();
 			PileupReader reader = new PileupReader(pileupFilename);
 			CopyNumberRecord record = calcCopyNumber(reader, normalTotal, tumorTotal);
-			writer.write(record.chrom);
-			writer.write(record.start);
-			writer.write(record.end);
-			writer.write(record.ratio);
-			writer.write(record.copyNumber);
-			writer.eol();
+			if (record != null) {
+				writer.write(record.chrom);
+				writer.write(record.start);
+				writer.write(record.end);
+				writer.write(record.ratio);
+				writer.write(record.copyNumber);
+				writer.eol();
+			}
 			reader.close();
 		} else if (region == null){
 			writer.write("name", "chrom", "start", "end", "ratio (log2)", "copy-number");
@@ -161,15 +164,25 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				PileupReader reader = new PileupReader(bis);
 
 				CopyNumberRecord record = calcCopyNumber(reader, normalTotal, tumorTotal);
-				writer.write(name);
-				writer.write(chrom);
-				writer.write(start);
-				writer.write(end);
-				writer.write(record.ratio);
-				writer.write(record.copyNumber);
-				writer.eol();
+				if (record != null) {
+					writer.write(name);
+					writer.write(chrom);
+					writer.write(start);
+					writer.write(end);
+					writer.write(record.ratio);
+					writer.write(record.copyNumber);
+					writer.eol();
+				}
 				reader.close();
-				proc.waitFor();
+				int retcode = proc.waitFor();
+				if (retcode != 0) {
+					BufferedReader eis = new BufferedReader(new InputStreamReader(proc.getErrorStream()));
+					String line1;
+					while ((line1=eis.readLine())!=null) {
+						System.err.println("WARNING: " + line1);
+					}
+					eis.close();
+				}
 				proc.getErrorStream().close();
 			    proc.getInputStream().close();
 			    proc.getOutputStream().close();
@@ -190,17 +203,27 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			InputStream bis = new BufferedInputStream(proc.getInputStream());
 			PileupReader reader = new PileupReader(bis);
 
-			GenomeRegion gen = GenomeRegion.parse(region, true);
+			GenomeSpan gen = GenomeSpan.parse(region, true);
 			
 			CopyNumberRecord record = calcCopyNumber(reader, normalTotal, tumorTotal);
-			writer.write(gen.ref);
-			writer.write(gen.start);
-			writer.write(gen.end);
-			writer.write(record.ratio);
-			writer.write(record.copyNumber);
-			writer.eol();
+			if (record != null) {
+				writer.write(gen.ref);
+				writer.write(gen.start);
+				writer.write(gen.end);
+				writer.write(record.ratio);
+				writer.write(record.copyNumber);
+				writer.eol();
+			}
 			reader.close();
-			proc.waitFor();
+			int retcode = proc.waitFor();
+			if (retcode != 0) {
+				BufferedReader eis = new BufferedReader(new InputStreamReader(proc.getErrorStream()));
+				String line1;
+				while ((line1=eis.readLine())!=null) {
+					System.err.println("WARNING: " + line1);
+				}
+				eis.close();
+			}
 			proc.getErrorStream().close();
 		    proc.getInputStream().close();
 		    proc.getOutputStream().close();
@@ -218,7 +241,6 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		int end = -1;
 
 		for (PileupRecord pileup: reader) {
-			
 			if (chrom == null) {
 				chrom = pileup.ref;
 				start = pileup.pos;
@@ -230,34 +252,44 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			tumorCounts.add(pileup.getSampleCount(1));
 		}
 
-		int[] norm = ListUtils.intListToArray(normalCounts);
-		int[] tumor = ListUtils.intListToArray(tumorCounts);
-
-		double medianRatio = calcCopyRatio(norm, tumor, normalTotal, tumorTotal);
+		int[] norm = listToArray(normalCounts);
+		int[] tumor = listToArray(tumorCounts);
 		
-		double copyNumber = calcCopyNumber(medianRatio);
-		
-		return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber);
+		if (norm.length >0 && tumor.length > 0) {
+			double medianRatio = calcCopyRatio(norm, tumor, normalTotal, tumorTotal);
+			double copyNumber = calcCopyNumber(medianRatio);
+			
+			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber);
+		}
 
+		return null;
+	}
+	
+	private int[] listToArray(List<Integer> l) {
+		int[] out = new int[l.size()];
+		for (int i=0; i<l.size();i++) {
+			out[i] = l.get(i);
+		}
+		return out;
 	}
 	
 	public static double calcCopyNumber(double ratio) {
 		return Math.pow(2, ratio + 1);
 	}
-	public static double calcCopyRatio(int[] norm, int[] tumor) {
-		return calcCopyRatio(norm, tumor, -1, -1);
+	public static double calcCopyRatio(int[] normCounts, int[] tumorCounts) {
+		return calcCopyRatio(normCounts, tumorCounts, -1, -1);
 	}
 	
-	public static double calcCopyRatio(int[] norm, int[] tumor, int normNormalization, int tumorNormalization) {
+	public static double calcCopyRatio(int[] normCounts, int[] tumorCounts, int normNormalization, int tumorNormalization) {
 		double[] normalizedNorm;
 		double[] normalizedTumor;
 
 		if (normNormalization > 0 && tumorNormalization > 0) {
-			normalizedNorm = normalizeLog2(norm, normNormalization);
-			normalizedTumor = normalizeLog2(tumor, tumorNormalization);
+			normalizedNorm = normalizeLog2(normCounts, normNormalization);
+			normalizedTumor = normalizeLog2(tumorCounts, tumorNormalization);
 		} else {
-			normalizedNorm = StatUtils.log2(norm);
-			normalizedTumor = StatUtils.log2(tumor);
+			normalizedNorm = StatUtils.log2(normCounts);
+			normalizedTumor = StatUtils.log2(tumorCounts);
 		}
 		
 		Arrays.sort(normalizedNorm);

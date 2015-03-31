@@ -1,33 +1,31 @@
-package org.ngsutils.cgsutils.cli.copynumber;
+package io.compgen.cgseq.cli.copynumber;
 
-import org.ngsutils.cgsutils.support.pileup.PileupReader;
-import org.ngsutils.cgsutils.support.pileup.SlidingWindowPileup;
-import org.ngsutils.cli.AbstractOutputCommand;
-import org.ngsutils.cli.Command;
-import org.ngsutils.support.TabWriter;
+import io.compgen.cmdline.annotation.Command;
+import io.compgen.cmdline.annotation.Exec;
+import io.compgen.cmdline.annotation.Option;
+import io.compgen.cmdline.annotation.UnnamedArg;
+import io.compgen.cmdline.impl.AbstractOutputCommand;
+import io.compgen.common.TabWriter;
+import io.compgen.ngsutils.pileup.PileupReader;
+import io.compgen.ngsutils.pileup.SlidingWindowPileup;
 
-import com.lexicalscope.jewel.cli.CommandLineInterface;
-import com.lexicalscope.jewel.cli.Option;
-import com.lexicalscope.jewel.cli.Unparsed;
-
-@CommandLineInterface(application="cgsutils breakpoints")
-@Command(name="breakpoints", desc="Find likely breakpoints across a chromosome (mpileup input, NT)", cat="copy-number")
+@Command(name="breakpoints", desc="Find likely breakpoints across a chromosome (mpileup input, NT)", category="copy-number")
 public class Breakpoints extends AbstractOutputCommand {
 	private String filename = "-";
 	private int windowSize = 10000;
 	private int stepSize = 2000;
 
-    @Option(description="Window size (default: 10000)", longName="window-size", defaultValue="10000")
+    @Option(desc="Window size (default: 10000)", name="window-size", defaultValue="10000")
     public void setWindowSize(int windowSize) {
     	this.windowSize = windowSize;
     }
 
-    @Option(description="Step size (default: 2000)", longName="step-size", defaultValue="2000")
+    @Option(desc="Step size (default: 2000)", name="step-size", defaultValue="2000")
     public void setStepSize(int stepSize) {
     	this.stepSize = stepSize;
     }
 
-    @Unparsed(name = "FILE")
+    @UnnamedArg(name = "FILE")
     public void setFilename(String filename) {
         this.filename = filename;
     }
@@ -39,7 +37,7 @@ public class Breakpoints extends AbstractOutputCommand {
 		return Math.log(d) / Math.log(2);
 	}
 	
-	@Override
+	@Exec
 	public void exec() throws Exception {
 		TabWriter writer = new TabWriter(out);
 		writer.write("chrom", "start", "end", "normal_dist", "tumor_dist", "ratio (log2)", "tumor_normal_diff");
