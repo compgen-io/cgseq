@@ -88,7 +88,7 @@ public class Stats {
 			lastacc = acc;
 			acc += func.inner(i);
 
-			if (acc == Double.NaN) {
+			if (Double.isNaN(acc)) {
 				return Double.NaN;
 			}
 			

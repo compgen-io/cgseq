@@ -1,10 +1,10 @@
-<project name="cgsutils" default="jar">
+<project name="cgseq" default="jar">
     <property name="version" value="0.1"/>
     <property name="lib.dir" value="lib"/>
+    <property name="blib.dir" value="blib"/>
     <property name="build.dir" value="build"/>
     <property name="dist.dir" value="dist"/>
     <property name="src.dir" value="src"/>
-	<property name="ngsutilsjar" value="../ngsutilsj/dist/ngsutilsj-0.1-aac799a.jar"/>
 	
     <target name="clean">
         <delete dir="${build.dir}"/>
@@ -13,36 +13,59 @@
 
 	<path id="classpath">
         <fileset dir="${lib.dir}" includes="**/*.jar"/>
-        <path location="${ngsutilsjar}"/>
     </path>
 
 	<target name="compile">
         <mkdir dir="${build.dir}/classes"/>
+        <!--
         <javac srcdir="${src.dir}/java" destdir="${build.dir}/classes" classpathref="classpath" debug="true" debuglevel="lines,vars,source"/>
+        -->
+        <javac
+            srcdir="${src.dir}/java"
+            destdir="${build.dir}/classes"
+            compiler="com.google.errorprone.ErrorProneAntCompilerAdapter"
+            encoding="UTF-8"
+            debug="true"
+            includeantruntime="false"
+            classpathref="classpath"
+            debuglevel="lines,vars,source"
+            >
+            <compilerclasspath>
+                <fileset file="${blib.dir}/error_prone_ant-2.0.2-SNAPSHOT.jar"/>
+            </compilerclasspath>
+        </javac>
+
     </target>
 
 	<target name="jar" depends="compile, git.revision">
-        <delete file="${build.dir}/classes/VERSION"/>
- 		<echo file="${build.dir}/classes/VERSION" message="cgsutils-${version}-${repository.version}"/>
+        <copy file="LICENSE" todir="${build.dir}/classes/"/>
+        <copy file="INCLUDES" todir="${build.dir}/classes/"/>
+        <delete file="${build.dir}/classes/io/compgen/cgseq/VERSION"/>
+ 		<echo file="${build.dir}/classes/io/compgen/cgseq/VERSION" message="${ant.project.name}-${version}-${repository.version}"/>
 
 		<mkdir dir="${dist.dir}"/>
-	    <taskdef name="jarjar" classname="com.tonicsystems.jarjar.JarJarTask"
-	        classpath="${lib.dir}/jarjar-1.4.jar"/>
-        <jarjar jarfile="${dist.dir}/cgsutils.jar">
+	    <taskdef name="jarjar" classname="com.tonicsystems.jarjar.JarJarTask" classpath="${blib.dir}/jarjar-1.4.jar"/>
+        <jar destfile="${dist.dir}/${ant.project.name}-${version}.jar" basedir="${build.dir}/classes"/>
+	    <jarjar jarfile="${dist.dir}/${ant.project.name}.jar.tmp">
             <manifest>
-                <attribute name="Main-Class" value="org.ngsutils.cgsutils.CGSUtils"/>
+                <attribute name="Main-Class" value="io.compgen.cgseq.CGSeq"/>
             </manifest>
-            <zipfileset src="${lib.dir}/objenesis-2.1.jar"/>
-            <zipfileset src="${lib.dir}/jewelcli-0.8.9.jar"/>
-            <zipfileset src="${ngsutilsjar}"/>
-            <fileset dir="${build.dir}/classes"/>
-        </jarjar>
-        <delete file="${dist.dir}/cgsutils"/>
- 		<concat destfile="${dist.dir}/cgsutils" binary="true">
+            <zipfileset src="${lib.dir}/compgen-common-0.2.jar"/>
+            <zipfileset src="${lib.dir}/compgen-cmdline-0.4.1.jar"/>
+            <zipfileset src="${lib.dir}/ngsutilsj-0.3.jar"/>
+            <zipfileset src="${lib.dir}/commons-compress-1.8.1.jar"/>
+            <zipfileset src="${lib.dir}/commons-math3-3.3.jar"/>
+            <zipfileset src="${lib.dir}/htsjdk-1.126.jar"/>
+	        <fileset dir="${build.dir}/classes"/>
+	    	<zap pattern="*.java"/>
+	    </jarjar>
+        <delete file="${dist.dir}/${project.name}"/>
+ 		<concat destfile="${dist.dir}/${ant.project.name}" binary="true">
  		     <fileset file="${src.dir}/scripts/stub.sh" />
- 		     <fileset file="${dist.dir}/cgsutils.jar" />
+ 		     <fileset file="${dist.dir}/${ant.project.name}.jar.tmp" />
  		</concat>
-		<chmod file="${dist.dir}/cgsutils" perm="755"/>
+        <delete file="${dist.dir}/${ant.project.name}.jar.tmp"/>
+		<chmod file="${dist.dir}/${ant.project.name}" perm="755"/>
 	</target>
 
 	<!-- See http://stackoverflow.com/questions/2974106/how-to-lookup-the-latest-git-commit-hash-from-an-ant-build-script -->

@@ -6,6 +6,7 @@ import io.compgen.cmdline.annotation.Exec;
 import io.compgen.cmdline.annotation.Option;
 import io.compgen.cmdline.exceptions.CommandArgumentException;
 import io.compgen.cmdline.impl.AbstractOutputCommand;
+import io.compgen.common.ListBuilder;
 import io.compgen.common.StringLineReader;
 import io.compgen.common.StringUtils;
 import io.compgen.common.TabWriter;
@@ -45,13 +46,18 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		public final int end;
 		public final double ratio;
 		public final double copyNumber;
+		public final double normMedian;
+		public final double tumorMedian;
+		
 
-		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber) {
+		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber, double normMedian, double tumorMedian) {
 			this.chrom = chrom;
 			this.start = start;
 			this.end = end;
 			this.ratio = ratio;
 			this.copyNumber = copyNumber;
+			this.normMedian = normMedian;
+			this.tumorMedian = tumorMedian;
 		}
 	}
 
@@ -63,6 +69,26 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 	private int normalTotal = -1;
 	private int tumorTotal = -1;
 
+	private int minBaseQual = 13;
+	private int minMapQ = 0;
+
+	private boolean properPairs = false;
+	
+    @Option(desc="Only count properly-paired reads", name="paired")
+    public void setProperPairs(boolean properPairs) {
+    	this.properPairs = properPairs;
+    }
+
+    @Option(desc="Minimum base quality", name="min-basequal", defaultValue="13")
+    public void setMinBaseQual(int minBaseQual) {
+    	this.minBaseQual = minBaseQual;
+    }
+
+    @Option(desc="Minimum read mapping quality (MAPQ)", name="min-mapq", defaultValue="0")
+    public void setMinMapQual(int minMapQ) {
+    	this.minMapQ = minMapQ;
+    }
+	
     @Option(desc="Normal BAM file", name="norm")
     public void setNormalFilename(String filename) {
     	this.normalFilename = filename;
@@ -126,7 +152,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		}
 		
 		if (pileupFilename != null) {
-			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number");
+			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
 			writer.eol();
 			PileupReader reader = new PileupReader(pileupFilename);
 			CopyNumberRecord record = calcCopyNumber(reader, normalTotal, tumorTotal);
@@ -136,11 +162,13 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(record.end);
 				writer.write(record.ratio);
 				writer.write(record.copyNumber);
+				writer.write(record.normMedian);
+				writer.write(record.tumorMedian);
 				writer.eol();
 			}
 			reader.close();
 		} else if (region == null){
-			writer.write("name", "chrom", "start", "end", "ratio (log2)", "copy-number");
+			writer.write("name", "chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
 			writer.eol();
 			
 			StringLineReader strReader = new StringLineReader(bedFilename);
@@ -155,7 +183,21 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 					System.err.println(name);
 				}
 				
-				ProcessBuilder pb = new ProcessBuilder("samtools", "mpileup", "-r", chrom + ":" + ""+(start+1) + "-" + ""+end , normalFilename,tumorFilename);
+				ListBuilder<String> lb = new ListBuilder<String>("samtools", "mpileup", "-r", chrom + ":" + ""+(start+1) + "-" + ""+end);
+				if (minMapQ > -1) {
+					lb.add("-q", ""+minMapQ);
+				}
+				if (minBaseQual > -1) {
+					lb.add("-Q", ""+minBaseQual);
+				}
+				if (properPairs) {
+					lb.add("--rf", "2");
+				}
+				
+				lb.add(normalFilename);
+				lb.add(tumorFilename);
+				
+				ProcessBuilder pb = new ProcessBuilder(lb.list());
 				if (verbose) {
 					System.err.println(StringUtils.join(" ", pb.command()));
 				}
@@ -171,6 +213,8 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 					writer.write(end);
 					writer.write(record.ratio);
 					writer.write(record.copyNumber);
+					writer.write(record.normMedian);
+					writer.write(record.tumorMedian);
 					writer.eol();
 				}
 				reader.close();
@@ -191,10 +235,24 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			}
 			strReader.close();
 		} else {
-			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number");
+			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
 			writer.eol();
 			
-			ProcessBuilder pb = new ProcessBuilder("samtools", "mpileup", "-r", region , normalFilename,tumorFilename);
+			ListBuilder<String> lb = new ListBuilder<String>("samtools", "mpileup", "-r", region);
+			if (minMapQ > -1) {
+				lb.add("-q", ""+minMapQ);
+			}
+			if (minBaseQual > -1) {
+				lb.add("-Q", ""+minBaseQual);
+			}
+			if (properPairs) {
+				lb.add("--rf", "2");
+			}
+
+			lb.add(normalFilename);
+			lb.add(tumorFilename);
+			
+			ProcessBuilder pb = new ProcessBuilder(lb.list());
 			if (verbose) {
 				System.err.println(StringUtils.join(" ", pb.command()));
 			}
@@ -210,8 +268,12 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(gen.ref);
 				writer.write(gen.start);
 				writer.write(gen.end);
+				writer.write(tumorTotal);
+				writer.write(normalTotal);
 				writer.write(record.ratio);
 				writer.write(record.copyNumber);
+				writer.write(record.normMedian);
+				writer.write(record.tumorMedian);
 				writer.eol();
 			}
 			reader.close();
@@ -256,10 +318,13 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		int[] tumor = listToArray(tumorCounts);
 		
 		if (norm.length >0 && tumor.length > 0) {
+			double normMedian = StatUtils.median(norm);
+			double tumorMedian = StatUtils.median(tumor);
+			
 			double medianRatio = calcCopyRatio(norm, tumor, normalTotal, tumorTotal);
 			double copyNumber = calcCopyNumber(medianRatio);
 			
-			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber);
+			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber, normMedian, tumorMedian);
 		}
 
 		return null;

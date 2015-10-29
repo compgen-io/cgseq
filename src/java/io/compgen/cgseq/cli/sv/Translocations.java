@@ -1,105 +1,156 @@
 package io.compgen.cgseq.cli.sv;
 
 import htsjdk.samtools.SAMRecord;
+import io.compgen.common.IterUtils;
+import io.compgen.common.progress.IncrementingStats;
+import io.compgen.common.progress.ProgressUtils;
+import io.compgen.ngsutils.annotation.AbstractAnnotationSource;
+import io.compgen.ngsutils.annotation.GenomeAnnotation;
 import io.compgen.ngsutils.annotation.GenomeSpan;
 
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 
-public class Translocations {
-	public class Translocation {
-		private GenomeSpan from;
-		private GenomeSpan to;
-		private Set<String> readnames = new HashSet<String>();
-		
-		public Translocation(GenomeSpan from, GenomeSpan to) {
-			this.from = from;
-			this.to = to;
-		}
-		
-		public void addEvidence(String readName) {
-			readnames.add(readName);
-		}
-		
-		public boolean containsRead(String readName) {
-			return readnames.contains(readName);
-		}
-		
-		public boolean overlaps(GenomeSpan span) {
-			return from.overlaps(span) || to.overlaps(span); 
-		}
-
-		public void extend(GenomeSpan span) {
-			if (from.overlaps(span)) {
-				int start = Math.min(from.start, span.start);
-				int end = Math.max(from.end,  span.end);
-				from = new GenomeSpan(from.ref, start, end, from.strand);
-			} else if (to.overlaps(span)) {
-				int start = Math.min(to.start, span.start);
-				int end = Math.max(to.end,  span.end);
-				to = new GenomeSpan(to.ref, start, end, to.strand);
-			}
-			
-		}
-		
-		public String toString() {
-			return from.ref+":"+from.start+"-"+from.end+" => "+to.ref+":"+to.start+"-"+to.end + " ("+readnames.size()+")";
-		}
+public class Translocations extends AbstractAnnotationSource<Translocation> {
+	@Override
+	public String[] getAnnotationNames() {
+		return null;
 	}
 	
-	private List<Translocation> translocations = new ArrayList<Translocation>();
 	private final int extend;
+	private final int minEvidence;
+	private List<Translocation> buffer = new ArrayList<Translocation>();
 	
-	public Translocations(int extend) {
+	public Translocations(int extend, int minEvidence) {
 		this.extend = extend;
+		this.minEvidence = minEvidence;
 	}
 
 	public void addRead(SAMRecord read) {
-    	GenomeSpan from = new GenomeSpan(read.getReferenceName(), read.getAlignmentStart()-1-extend, read.getAlignmentEnd()+extend);
+		// Extend the region in the 3' direction... This will be run streaming through a BAM file, so we should start
+		// at the 5' end for all regions anyway.
+		
+		GenomeSpan from = new GenomeSpan(read.getReferenceName(), read.getAlignmentStart()-1, read.getAlignmentEnd()+extend);
 
-    	// the "to" is only an estimate of the proper span for now... when we parse the mate (later in the file), this will get fixed.
+		// the "to" is only an estimate of the proper span for now... when we parse the mate (later in the file), this will get fixed.
+		// We want to extend the target region to make it more likely to merge other reads indicative of the SV 
     	GenomeSpan to = new GenomeSpan(read.getMateReferenceName(), read.getMateAlignmentStart()-1-extend, read.getMateAlignmentStart()+extend);
     
-    	addTranslocation(read.getReadName(), from, to);
+    	addTranslocation(read.getReadName(), from, to, read.getReadNegativeStrandFlag());
 	}
 
-	public void addTranslocation(String readName, GenomeSpan from, GenomeSpan to) {
-		// TODO: toss translocations that are out of this window?
+	public void addTranslocation(String readName, GenomeSpan from, GenomeSpan to, boolean isNegStrand) {
+		// We will only be scanning in the 5->3 direction, and the BAM file is sorted,
+		// so we store a current translocation and use it to keep state. This also makes
+		// processing significantly faster.
+		//
+		// If the new read doesn't fit the current, then we can assume it's part of a new
+		// block.
+
+		boolean found = false;
+		List<Translocation> newbuf = new ArrayList<Translocation> ();
 		
-		
-		for (Translocation t: translocations) {
-			if (t.containsRead(readName)) {
-				t.extend(from);
-				t.extend(to);
-				t.addEvidence(readName);
-				// found by name, return
-				return;
+		for (Translocation current: buffer) {
+			if (current.containsRead(readName)) {
+				// Is this read already known?
+				// (this shouldn't be common with the temp buffer stream approach)
+				current.extendFrom(from);
+				current.extendTo(to);
+				current.addEvidence(readName, isNegStrand);
+				newbuf.add(current);
+				found = true;
+			} else if (current.overlapsFrom(from)) {
+				// do the "froms" overlap? 
+				if (current.overlapsTo(to)) {
+					// if the "tos" overlap, add this read
+					current.extendFrom(from);
+					current.extendTo(to);
+					current.addEvidence(readName, isNegStrand);
+					found = true;
+				}
+				// since we matched "froms", this region is still in play for the next read
+				newbuf.add(current);
+			} else {
+				// if we don't overlap the "from", we never will... kick this one out or add it to the list.
+				if (current.getEvidenceCount() >= minEvidence) {
+					// only add if there is enough evidence (for this half of the SV, check the reciprocal later) 
+					addAnnotation(current.getFrom(), current);
+				}
 			}
 		}
 
-		for (Translocation t: translocations) {
-			if (t.overlaps(from) || t.overlaps(to)) {
-				t.extend(from);
-				t.extend(to);
-				t.addEvidence(readName);
-				return;
-			}
+		buffer = newbuf;
+
+		if (!found) {
+			Translocation current = new Translocation(from, to);
+			current.addEvidence(readName, isNegStrand);
+			buffer.add(current);
 		}
-		
-		Translocation t = new Translocation(from, to);
-		t.addEvidence(readName);
-		translocations.add(t);
 	}
 	
-	public int size() {
-		return translocations.size();
+	public List<Translocation> peekBuffer() {
+		return Collections.unmodifiableList(buffer);
+	}
+	
+	public void done() {
+		for (Translocation current: buffer) {
+			if (current.getEvidenceCount() >= minEvidence) {
+				addAnnotation(current.getFrom(), current);
+			}
+		}
+		buffer.clear();
 	}
 	
 	public void dump() {
-		for (Translocation t: translocations) {
-			System.out.println(t);
+		for (GenomeAnnotation<Translocation> t: IterUtils.wrap(annotations.iterator())) {
+			if (t.getValue().getEvidenceCount() >= minEvidence) {
+				if (t.getValue().getReciprocal() != null) {
+					System.out.println(t.getValue() + "\t" + t.getValue().getReciprocal());
+				}
+			}
 		}
+	}
+
+	public void findReciprocalMatches() {
+//		Set<Translocation> matches = new HashSet<Translocation>();
+		PrintStream out;
+		try {
+			out = new PrintStream(new FileOutputStream("tmp.txt"));
+		} catch (FileNotFoundException e) {
+			return;
+		}
+		
+		for (GenomeAnnotation<Translocation> t: IterUtils.wrap(ProgressUtils.getIterator("Finding reciprocal matches", annotations.iterator(), new IncrementingStats(annotations.size())))) {
+			if (t.getValue().getReciprocal() != null) {
+				continue;
+			}
+			Translocation target = null;
+			out.println("Trans t: " + t.getValue().getFrom()+ " => " + t.getValue().getTo());
+			// look for all possible translocations in the "to" region
+			for (Translocation potential : findAnnotation(t.getValue().getTo())) {
+				out.print("  potential: " + potential.getFrom()+ " => " + potential.getTo());
+				// for each of these, is there a reciprocal match?
+				if (t.getValue().getFrom().overlaps(potential.getTo())) {
+					out.print(" RECIP MATCH!");
+					if (target == null) {
+						out.println("");
+						target = potential;
+					} else {
+						target.combine(potential);
+						out.println(" Merging to: "+ target.getFrom()+ " => " + target.getTo());
+					}
+				} else {
+					out.println(" NO RECIP MATCH!");
+				}
+			}
+			if (target != null) {
+				t.getValue().setReciprocal(target);
+			}
+		}
+		out.close();
 	}
 }
