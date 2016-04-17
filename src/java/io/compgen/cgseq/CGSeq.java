@@ -2,6 +2,8 @@ package io.compgen.cgseq;
 
 import io.compgen.cgseq.cli.copynumber.BreakpointFinder;
 import io.compgen.cgseq.cli.copynumber.PileupCopyNumber;
+import io.compgen.cgseq.cli.genome.Mappability;
+import io.compgen.cgseq.cli.genome.MappabilityBamToCounts;
 import io.compgen.cgseq.cli.sv.Discord;
 import io.compgen.cgseq.cli.varcall.Germline;
 import io.compgen.cgseq.cli.varcall.Somatic;
@@ -43,6 +45,8 @@ public class CGSeq {
 		.addCommand(Germline.class)
 		.addCommand(Somatic.class)
 		.addCommand(SimuCall.class)
+		.addCommand(Mappability.class)
+		.addCommand(MappabilityBamToCounts.class)
 		.findAndRun(args);
 	}
 		

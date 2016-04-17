@@ -9,18 +9,25 @@ public class Stats {
 		public double inner(int x);
 	}
 
+
 	/**
 	 * http://en.wikipedia.org/wiki/Skellam_distribution
-	 * @param k
-	 * @param mu1
-	 * @param mu2
-	 * @return
+	 * @param k - difference between counts
+	 * @param mu1 - expected Poisson mean 1
+	 * @param mu2 - expected Poisson mean 2
+	 * @return - probability of having the difference (k) between two Poisson counts given distributions means mu1 & mu2
 	 */
 	
 	public static double skellam(int k, double mu1, double mu2) {
 		return Math.exp(-mu1-mu2) * Math.pow(mu1/mu2,k/2.0) * besselI(2 * Math.sqrt(mu1 * mu2), k);
 	}
 
+	/**
+	 * Given two Poisson means, calculate the number where the p-value for the difference (k) is highest.
+	 * @param mu1
+	 * @param mu2
+	 * @return
+	 */
 	public static int skellamCrossingPoint(double mu1, double mu2) {
 		int i = (int) Math.max(mu1, mu2);
 		double maxval = 0.0;
@@ -28,7 +35,7 @@ public class Stats {
 
 		while (true) {
 			val = skellam(i, mu1, mu2);
-			System.err.println("i="+i+", val="+val+ ", maxval="+maxval);
+//			System.err.println("i="+i+", val="+val+ ", maxval="+maxval);
 			if (val < maxval) {
 				return i+1;
 			}
@@ -58,7 +65,7 @@ public class Stats {
 		 * I_v(Z) = sigma(k=0..inf) { (1/(gamma(k + v + 1)* k!)) * (Z/2)^(2k+v) } 
 		 */
 
-		return sum(0, Integer.MAX_VALUE, new InnerFunc() {
+		return sumDelta(0, Integer.MAX_VALUE, new InnerFunc() {
 			@Override
 			public double inner(int k) {
 				return (
@@ -72,16 +79,18 @@ public class Stats {
 
 	/**
 	 * Iterate over a range and sum the results
+	 * This iterates until the return value doesn't change by more than DEFAULT_DELTA
+	 * This is particularly useful when you are iterate to infinity... (or Integer.MAX_VALUE)
 	 * @param from
 	 * @param to
 	 * @param func
 	 * @return
 	 */
-	public static double sum(int from, int to, InnerFunc func) {
-		return sum(from, to, func, DEFAULT_DELTA);
+	public static double sumDelta(int from, int to, InnerFunc func) {
+		return sumDelta(from, to, func, DEFAULT_DELTA);
 	}
 	
-	public static double sum(int from, int to, InnerFunc func, double delta) {
+	public static double sumDelta(int from, int to, InnerFunc func, double delta) {
 		double acc = 0.0;
 		double lastacc = acc;
 		for (int i=from; i<=to; i++) {

@@ -29,7 +29,9 @@ public class PoissonVariant {
 
 	public VariantResults calcVariant(List<PileupBaseCall> calls) {
 		MapCount<String> counter = new MapCount<String>();
+		int rawDepth = 0;
 		for (PileupBaseCall call: calls) {
+			rawDepth ++;
 			if (call.qual > minQual || call.op != PileupBaseCallOp.Match) {
 				counter.incr(call.toString());
 			}
@@ -40,7 +42,7 @@ public class PoissonVariant {
 		if (sorted.size()==0) {
 			return null;
 		}
-		
+
 //		for (Pair<String, Integer> tup: sorted) {
 //			System.out.println(tup.one+"\t"+tup.two);
 //		}
@@ -90,7 +92,7 @@ public class PoissonVariant {
 		
 		// TODO: Also test the quality distributions for major/minor?
 		
-		return new VariantResults(majorCall, minorCall, major, minor, bg, majorPvalue, altPvalue, majorError, altError, majorPlusStrandCount, majorMinusStrandCount, minorPlusStrandCount, minorMinusStrandCount);//, majorStrandPval, minorStrandPval);
+		return new VariantResults(majorCall, minorCall, rawDepth, majorPvalue - altPvalue);//, majorStrandPval, minorStrandPval);
 	}
 	
 	LRUCache<Pair<Integer, Double>, Double> dCache = new LRUCache<Pair<Integer, Double>, Double>(10000);

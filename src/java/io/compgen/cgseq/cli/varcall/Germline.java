@@ -5,7 +5,8 @@ import htsjdk.samtools.SAMSequenceRecord;
 import htsjdk.samtools.SamReader;
 import htsjdk.samtools.SamReaderFactory;
 import io.compgen.cgseq.CGSeq;
-import io.compgen.cgseq.variant.PoissonVariant;
+import io.compgen.cgseq.variant.SkellamVariantCaller;
+import io.compgen.cgseq.variant.VariantCaller;
 import io.compgen.cgseq.variant.VariantResults;
 import io.compgen.cmdline.annotation.Command;
 import io.compgen.cmdline.annotation.Exec;
@@ -30,7 +31,7 @@ public class Germline extends AbstractOutputCommand {
 	private String refFilename;
 	
 	private int minBaseQual = 30;
-	private int minMappingQual = 0;
+	private int minMappingQual = 10;
 
 	private int filterFlags = -1;
     private int requiredFlags = -1;
@@ -80,7 +81,7 @@ public class Germline extends AbstractOutputCommand {
     	this.minBaseQual = minBaseQual;
     }
 
-    @Option(desc="Minimum alignment mapping score", name="mapqual", defaultValue="0")
+    @Option(desc="Minimum alignment mapping score", name="mapqual", defaultValue="10")
     public void setMinMapQual(int minMappingQual) {
     	this.minMappingQual = minMappingQual;
     }
@@ -152,6 +153,7 @@ public class Germline extends AbstractOutputCommand {
 		TabWriter writer = new TabWriter(out);
 		writer.write_line("##fileformat=VCFv4.1");
 		writer.write_line("##cgseqVersion="+CGSeq.getVersion());
+		writer.write_line("##cgseqCommand="+CGSeq.getArgs());
 		writer.write_line("##reference=file://"+new File(refFilename).getAbsolutePath());
 		writer.write_line("##pileupCommand="+StringUtils.join(" ", pileup.getCommand()));
 
@@ -162,13 +164,18 @@ public class Germline extends AbstractOutputCommand {
 		}
 		bam.close();
 
-		writer.write_line("##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Raw read depth\">");
-		writer.write_line("##INFO=<ID=DP4,Number=4,Type=Integer,Description=\"# high-quality ref-forward bases, ref-reverse, alt-forward and alt-reverse bases\">");
+		VariantCaller caller = new SkellamVariantCaller(backgroundCorrect, minBaseQual, minCoverage);
 
+		for (String k: caller.getInfoFields().keySet()) {
+			writer.write_line("##INFO=<ID="+k+","+caller.getInfoFields().get(k)+">");
+		}
+		for (String k: caller.getFormatFields().keySet()) {
+			writer.write_line("##FORMAT=<ID="+k+","+caller.getFormatFields().get(k)+">");
+		}
+		
 		writer.write("#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", filename);
 		writer.eol();
 
-		PoissonVariant poissonCaller = new PoissonVariant(backgroundCorrect, minBaseQual, expectedAlleleFrequency);
 		
 		for (PileupRecord record: IterUtils.wrap(pileup.pileup())) {
 			if (record.getSampleRecords(0).coverage < minCoverage) {
@@ -176,67 +183,20 @@ public class Germline extends AbstractOutputCommand {
 			}
 			
 			// Germline should be the first record
-			VariantResults varResult = poissonCaller.calcVariant(record.getSampleRecords(0).calls);
+			VariantResults varResult = caller.calcVariant(record.getSampleRecords(0).calls, record.ref);
 			
 			if (varResult == null) {
 				continue;
 			}
 
-			// Assume the following possible genotypes: REF:REF, REF:ALT, ALT:ALT.
+			// Assume the following possible genotypes: REF:REF, REF:ALT, ALT:ALT (order: AA,AB,BB) - for a HET not including the REF base, the order is AA,AB,BB,AC,BC,CC, (ref:alt1:alt2 ?? )
 
 			String altCall = null;
-			int qual=-1;
-			int DP=-1;
-			String DP4=""; 
 
-			// Is this a REF:ALT call?
-			if (varResult.altPvalue > varResult.majorPvalue) {
-				if (varResult.getMinorStrandFreq() >= minMinorStrandFreq) {
-					// Yes - AB
-					qual = pvalueToPhred(varResult.altError);
-					DP = varResult.majorCount + varResult.minorCount;
-					if (record.refBase.toUpperCase().equals(varResult.majorCall.toUpperCase())) {
-						// REF:ALT
-						altCall = varResult.minorCall;
-						DP4 = varResult.majorPlusStrandCount+","+varResult.majorMinusStrandCount+","+varResult.minorPlusStrandCount+","+varResult.minorMinusStrandCount;
-					} else {
-						// ALT:REF
-						altCall = varResult.majorCall;
-						DP4 = varResult.minorPlusStrandCount+","+varResult.minorMinusStrandCount+","+varResult.majorPlusStrandCount+","+varResult.majorMinusStrandCount;
-					}
-				}
-			}
-			
-			if (altCall == null) {
-				DP = varResult.majorCount;
-				qual = pvalueToPhred(varResult.majorError);
-				if (!record.refBase.toUpperCase().equals(varResult.majorCall.toUpperCase())) {
-					// TODO: check for multi-allele? 
-					if (varResult.getMajorStrandFreq() >= minMinorStrandFreq) {
-						altCall = varResult.majorCall;
-						DP4 = "0,0,"+varResult.majorPlusStrandCount+","+varResult.majorMinusStrandCount; // ALT:ALT
-					}
-				}
-				
-				if (altCall == null) {
-					DP4 = varResult.majorPlusStrandCount+","+varResult.majorMinusStrandCount+",0,0"; // REF:REF
-				}
-			}
-
-			// otherwise we could be REF:REF or ALT:ALT.
-
-			if (onlyVariants && altCall == null) {
-				continue;
-			}
-			
-			
-			if (altCall != null && altCall.equals(varResult.majorCall)) {
+			if (varResult.minorCall == null) {
+				// homozygous major (not necessarily ref)
 				
 			}
-
-			
-			
-			
 			
 			
 			writer.write(record.ref);
@@ -251,33 +211,26 @@ public class Germline extends AbstractOutputCommand {
 			}
 
 			// qual is prob we are wrong (for either way...)
-			writer.write(qual);
+			writer.write(varResult.getQual());
 			
 			// info
 			List<String> info = new ArrayList<String>();
-			info.add("DP="+DP);
-			info.add("DP4="+DP4);
-			info.add("CALLS="+varResult.majorCall+","+varResult.minorCall);
-			info.add("COUNTS="+varResult.majorCount+","+varResult.minorCount);
-			info.add("MAJSTRAND_FREQ="+varResult.getMajorStrandFreq());
-			info.add("MINSTRAND_FREQ="+varResult.getMinorStrandFreq());
-			
+			for (String k: caller.getInfoFields().keySet()) {
+				if (varResult.containsInfo(k)) {
+					info.add(k+"="+varResult.getInfo(k));
+				}
+			}
 			writer.write(StringUtils.join(";", info));
 			
 			
 			// format
-			writer.write("");
-//			writer.write(varResult.majorCall);
-//			writer.write(varResult.minorCall);
-//			writer.write(varResult.majorCount);
-//			writer.write(varResult.minorCount);
-//			writer.write(varResult.bgCount);
-//			writer.write(varResult.hetPvalue);
-//			writer.write(varResult.homPvalue);
-//			writer.write(varResult.majorPlusStrandFreq);
-//			writer.write(varResult.minorPlusStrandFreq);
-//			writer.write(varResult.majorPlusPvalue);
-//			writer.write(varResult.minorPlusPvalue);
+			List<String> format = new ArrayList<String>();
+			for (String k: caller.getFormatFields().keySet()) {
+				if (varResult.containsFormat(k)) {
+					format.add(k+"="+varResult.getFormat(k));
+				}
+			}
+			writer.write(StringUtils.join(";", format));
 			writer.eol();
 		}
 		writer.close();
