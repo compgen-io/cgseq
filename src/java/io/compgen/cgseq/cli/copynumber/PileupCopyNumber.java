@@ -1,6 +1,8 @@
 package io.compgen.cgseq.cli.copynumber;
 
 import io.compgen.cgseq.CGSeq;
+import io.compgen.cgseq.variant.SkellamVariantCaller;
+import io.compgen.cgseq.variant.VariantResults;
 import io.compgen.cmdline.annotation.Command;
 import io.compgen.cmdline.annotation.Exec;
 import io.compgen.cmdline.annotation.Option;
@@ -39,7 +41,9 @@ import java.util.List;
 		 		+ "size of the region, the more accurate the estimate will be (assuming that there aren't any\n"
 		 		+ "copy-number changes within the region).\n\n"
 		 		+ "The log-ratio is determined by taking the log2 ratio of tumor/normal using the the median\n"
-		 		+ "read count. Copy number is then 2^(log2-ratio + 1)."
+		 		+ "read count. Copy number is then 2^(log2-ratio + 1).\n\n"
+		 		+ "Average minor-allele frequency is calculated based on the minor-allele frequency for *only*\n"
+		 		+ "heterozygous germline-variants. Germline variants calculated using the Skellam distribution."
 		 )
 
 public class PileupCopyNumber extends AbstractOutputCommand {
@@ -74,16 +78,23 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 	private int normalTotal = -1;
 	private int tumorTotal = -1;
 
+	private int minMAFDepth = 10;
 	private int minBaseQual = 13;
 	private int minMapQ = 0;
 
 	private boolean properPairs = false;
-	
+	private SkellamVariantCaller germlineCaller = null;
+
     @Option(desc="Only count properly-paired reads", name="paired")
     public void setProperPairs(boolean properPairs) {
     	this.properPairs = properPairs;
     }
     
+    @Option(desc="Minimum depth for MAF calculation", name="min-maf-depth", defaultValue="10")
+    public void setMinMAFDepth(int minMAFDepth) {
+    	this.minMAFDepth = minMAFDepth;
+    }
+
     @Option(desc="Minimum base quality", name="min-basequal", defaultValue="13")
     public void setMinBaseQual(int minBaseQual) {
     	this.minBaseQual = minBaseQual;
@@ -156,6 +167,8 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 	        writer.write_line("## normal-total: " + normalTotal);
 		}
 		
+		germlineCaller = new SkellamVariantCaller(true, minBaseQual, minMAFDepth);
+
 		if (pileupFilename != null) {
 			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median", "ave_maf");
 			writer.eol();
@@ -324,55 +337,60 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			normalCounts.add(pileup.getSampleCount(0));
 			tumorCounts.add(pileup.getSampleCount(1));
 			
-			// Calculate MAF (not necessarily the B-allele frequency, will always be 0.0-0.5)
-			PileupSampleRecord tumor = pileup.getSampleRecords(1);
-			
-			int[] counts = new int[]{ 0, 0, 0, 0 };
-			
-			for (PileupBaseCall call: tumor.calls) {
-				if (call.op == PileupBaseCallOp.Match) {
-					switch(call.call) {
-					case "A":
-						counts[0]++;
-						break;
-					case "C":
-						counts[1]++;
-						break;
-					case "G":
-						counts[2]++;
-						break;
-					case "T":
-						counts[3]++;
-						break;
+			PileupSampleRecord normal = pileup.getSampleRecords(0);
+			VariantResults var = germlineCaller.calcVariant(normal.calls, ""); // we don't actually care about REF here.
+			if (var.minorCall != null) {
+				// if there is a minor call, then this is a het.
+				// Calculate MAF (not necessarily the B-allele frequency, will always be 0.0-0.5)
+				PileupSampleRecord tumor = pileup.getSampleRecords(1);
+				
+				int[] counts = new int[]{ 0, 0, 0, 0 };
+				
+				for (PileupBaseCall call: tumor.calls) {
+					if (call.op == PileupBaseCallOp.Match) {
+						switch(call.call) {
+						case "A":
+							counts[0]++;
+							break;
+						case "C":
+							counts[1]++;
+							break;
+						case "G":
+							counts[2]++;
+							break;
+						case "T":
+							counts[3]++;
+							break;
+						}
 					}
 				}
-			}
-			
-			int max = 0;
-			int max_i = -1;
-			for (int i=0; i<counts.length; i++) {
-				if (counts[i] > max) {
-					max = counts[i];
-					max_i = i;
+				
+				int max = 0;
+				int max_i = -1;
+				for (int i=0; i<counts.length; i++) {
+					if (counts[i] > max) {
+						max = counts[i];
+						max_i = i;
+					}
 				}
-			}
-			
-			int major = max;
-			counts[max_i] = 0;
-
-			max = 0;
-			max_i = 0;
-			for (int i=0; i<counts.length; i++) {
-				if (counts[i] > max) {
-					max = counts[i];
-					max_i = i;
+				
+				int major = max;
+				counts[max_i] = 0;
+	
+				max = 0;
+				max_i = 0;
+				for (int i=0; i<counts.length; i++) {
+					if (counts[i] > max) {
+						max = counts[i];
+						max_i = i;
+					}
 				}
+				
+				int minor = max;
+				
+				mafAcc += ((double) minor / (major + minor));
+				mafCount ++;
 			}
-			
-			int minor = max;
-			
-			mafAcc += ((double) minor / (major + minor));
-			mafCount ++;
 			
 		}
 
