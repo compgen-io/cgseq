@@ -13,6 +13,9 @@ import io.compgen.common.TabWriter;
 import io.compgen.ngsutils.annotation.GenomeSpan;
 import io.compgen.ngsutils.pileup.PileupReader;
 import io.compgen.ngsutils.pileup.PileupRecord;
+import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCall;
+import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCallOp;
+import io.compgen.ngsutils.pileup.PileupRecord.PileupSampleRecord;
 import io.compgen.ngsutils.support.stats.StatUtils;
 
 import java.io.BufferedInputStream;
@@ -48,9 +51,10 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		public final double copyNumber;
 		public final double normMedian;
 		public final double tumorMedian;
+		public final double aveMAF;
 		
 
-		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber, double normMedian, double tumorMedian) {
+		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber, double normMedian, double tumorMedian, double aveMAF) {
 			this.chrom = chrom;
 			this.start = start;
 			this.end = end;
@@ -58,6 +62,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			this.copyNumber = copyNumber;
 			this.normMedian = normMedian;
 			this.tumorMedian = tumorMedian;
+			this.aveMAF = aveMAF;
 		}
 	}
 
@@ -78,7 +83,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
     public void setProperPairs(boolean properPairs) {
     	this.properPairs = properPairs;
     }
-
+    
     @Option(desc="Minimum base quality", name="min-basequal", defaultValue="13")
     public void setMinBaseQual(int minBaseQual) {
     	this.minBaseQual = minBaseQual;
@@ -152,7 +157,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		}
 		
 		if (pileupFilename != null) {
-			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
+			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median", "ave_maf");
 			writer.eol();
 			PileupReader reader = new PileupReader(pileupFilename);
 			CopyNumberRecord record = calcCopyNumber(reader, normalTotal, tumorTotal);
@@ -164,11 +169,12 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(record.copyNumber);
 				writer.write(record.normMedian);
 				writer.write(record.tumorMedian);
+				writer.write(record.aveMAF);
 				writer.eol();
 			}
 			reader.close();
 		} else if (region == null){
-			writer.write("name", "chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
+			writer.write("name", "chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median", "ave_maf");
 			writer.eol();
 			
 			StringLineReader strReader = new StringLineReader(bedFilename);
@@ -215,6 +221,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 					writer.write(record.copyNumber);
 					writer.write(record.normMedian);
 					writer.write(record.tumorMedian);
+					writer.write(record.aveMAF);
 					writer.eol();
 				}
 				reader.close();
@@ -235,7 +242,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			}
 			strReader.close();
 		} else {
-			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median");
+			writer.write("chrom", "start", "end", "ratio (log2)", "copy-number", "norm-median", "tumor-median", "ave_maf");
 			writer.eol();
 			
 			ListBuilder<String> lb = new ListBuilder<String>("samtools", "mpileup", "-r", region);
@@ -274,6 +281,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(record.copyNumber);
 				writer.write(record.normMedian);
 				writer.write(record.tumorMedian);
+				writer.write(record.aveMAF);
 				writer.eol();
 			}
 			reader.close();
@@ -301,6 +309,9 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		String chrom = null;
 		int start = -1;
 		int end = -1;
+		
+		double mafAcc = 0.0;
+		int mafCount = 0;
 
 		for (PileupRecord pileup: reader) {
 			if (chrom == null) {
@@ -312,6 +323,57 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			
 			normalCounts.add(pileup.getSampleCount(0));
 			tumorCounts.add(pileup.getSampleCount(1));
+			
+			// Calculate MAF (not necessarily the B-allele frequency, will always be 0.0-0.5)
+			PileupSampleRecord tumor = pileup.getSampleRecords(1);
+			
+			int[] counts = new int[]{ 0, 0, 0, 0 };
+			
+			for (PileupBaseCall call: tumor.calls) {
+				if (call.op == PileupBaseCallOp.Match) {
+					switch(call.call) {
+					case "A":
+						counts[0]++;
+						break;
+					case "C":
+						counts[1]++;
+						break;
+					case "G":
+						counts[2]++;
+						break;
+					case "T":
+						counts[3]++;
+						break;
+					}
+				}
+			}
+			
+			int max = 0;
+			int max_i = -1;
+			for (int i=0; i<counts.length; i++) {
+				if (counts[i] > max) {
+					max = counts[i];
+					max_i = i;
+				}
+			}
+			
+			int major = max;
+			counts[max_i] = 0;
+
+			max = 0;
+			max_i = 0;
+			for (int i=0; i<counts.length; i++) {
+				if (counts[i] > max) {
+					max = counts[i];
+					max_i = i;
+				}
+			}
+			
+			int minor = max;
+			
+			mafAcc += ((double) minor / (major + minor));
+			mafCount ++;
+			
 		}
 
 		int[] norm = listToArray(normalCounts);
@@ -324,7 +386,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			double medianRatio = calcCopyRatio(norm, tumor, normalTotal, tumorTotal);
 			double copyNumber = calcCopyNumber(medianRatio);
 			
-			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber, normMedian, tumorMedian);
+			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber, normMedian, tumorMedian, mafCount > 0 ? mafAcc / mafCount: 0);
 		}
 
 		return null;
