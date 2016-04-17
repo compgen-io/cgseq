@@ -55,10 +55,11 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		public final double copyNumber;
 		public final double normMedian;
 		public final double tumorMedian;
-		public final double aveMAF;
+		public final double mafAve;
+		public final double mafStdev;
 		
 
-		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber, double normMedian, double tumorMedian, double aveMAF) {
+		public CopyNumberRecord(String chrom, int start, int end, double ratio, double copyNumber, double normMedian, double tumorMedian, double mafAve, double mafStdev) {
 			this.chrom = chrom;
 			this.start = start;
 			this.end = end;
@@ -66,7 +67,8 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			this.copyNumber = copyNumber;
 			this.normMedian = normMedian;
 			this.tumorMedian = tumorMedian;
-			this.aveMAF = aveMAF;
+			this.mafAve = mafAve;
+			this.mafStdev = mafStdev;
 		}
 	}
 
@@ -105,21 +107,21 @@ public class PileupCopyNumber extends AbstractOutputCommand {
     	this.minMapQ = minMapQ;
     }
 	
-    @Option(desc="Normal BAM file", name="norm")
+    @Option(desc="Normal BAM file", name="norm", helpValue="fname")
     public void setNormalFilename(String filename) {
     	this.normalFilename = filename;
     }
 
-    @Option(desc="Tumor BAM file", name="tumor")
+    @Option(desc="Tumor BAM file", name="tumor", helpValue="fname")
     public void setTumorFilename(String filename) {
     	this.tumorFilename = filename;
     }
     
-    @Option(desc="Regions BED file", name="bed")
+    @Option(desc="Regions BED file", name="bed", helpValue="fname")
     public void setBEDFilename(String filename) {
     	this.bedFilename = filename;
     }
-    @Option(desc="Region to find copy-number for (using BAM files)", name="region")
+    @Option(desc="Region to find copy-number (chr:start-end, using BAM files)", name="region")
     public void setRegion(String region) {
     	this.region = region;
     }
@@ -134,7 +136,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
         	this.tumorTotal = count;
     }
 
-    @Option(desc="Pileup file", name="pileup")
+    @Option(desc="Pileup file", name="pileup", helpValue="fname")
     public void setPileupFilename(String pileupFilename) {
         this.pileupFilename = pileupFilename;
     }
@@ -182,7 +184,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(record.copyNumber);
 				writer.write(record.normMedian);
 				writer.write(record.tumorMedian);
-				writer.write(record.aveMAF);
+				writer.write(record.mafAve);
 				writer.eol();
 			}
 			reader.close();
@@ -234,7 +236,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 					writer.write(record.copyNumber);
 					writer.write(record.normMedian);
 					writer.write(record.tumorMedian);
-					writer.write(record.aveMAF);
+					writer.write(record.mafAve);
 					writer.eol();
 				}
 				reader.close();
@@ -294,7 +296,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 				writer.write(record.copyNumber);
 				writer.write(record.normMedian);
 				writer.write(record.tumorMedian);
-				writer.write(record.aveMAF);
+				writer.write(record.mafAve);
 				writer.eol();
 			}
 			reader.close();
@@ -323,8 +325,7 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 		int start = -1;
 		int end = -1;
 		
-		double mafAcc = 0.0;
-		int mafCount = 0;
+		List<Double> maf = new ArrayList<Double>();
 
 		for (PileupRecord pileup: reader) {
 			if (chrom == null) {
@@ -338,60 +339,63 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			tumorCounts.add(pileup.getSampleCount(1));
 			
 			PileupSampleRecord normal = pileup.getSampleRecords(0);
+			if (normal.calls == null) {
+				continue;
+			}
 			VariantResults var = germlineCaller.calcVariant(normal.calls, ""); // we don't actually care about REF here.
-			if (var.minorCall != null) {
-				// if there is a minor call, then this is a het.
-				// Calculate MAF (not necessarily the B-allele frequency, will always be 0.0-0.5)
-				PileupSampleRecord tumor = pileup.getSampleRecords(1);
-				
-				int[] counts = new int[]{ 0, 0, 0, 0 };
-				
-				for (PileupBaseCall call: tumor.calls) {
-					if (call.op == PileupBaseCallOp.Match) {
-						switch(call.call) {
-						case "A":
-							counts[0]++;
-							break;
-						case "C":
-							counts[1]++;
-							break;
-						case "G":
-							counts[2]++;
-							break;
-						case "T":
-							counts[3]++;
-							break;
-						}
+			if (var == null || var.minorCall == null) {
+				continue;
+			}
+
+			// if there is a minor call, then this is a het.
+			// Calculate MAF (not necessarily the B-allele frequency, will always be 0.0-0.5)
+			PileupSampleRecord tumor = pileup.getSampleRecords(1);
+			
+			int[] counts = new int[]{ 0, 0, 0, 0 };
+			
+			for (PileupBaseCall call: tumor.calls) {
+				if (call.op == PileupBaseCallOp.Match) {
+					switch(call.call) {
+					case "A":
+						counts[0]++;
+						break;
+					case "C":
+						counts[1]++;
+						break;
+					case "G":
+						counts[2]++;
+						break;
+					case "T":
+						counts[3]++;
+						break;
 					}
 				}
-				
-				int max = 0;
-				int max_i = -1;
-				for (int i=0; i<counts.length; i++) {
-					if (counts[i] > max) {
-						max = counts[i];
-						max_i = i;
-					}
-				}
-				
-				int major = max;
-				counts[max_i] = 0;
-	
-				max = 0;
-				max_i = 0;
-				for (int i=0; i<counts.length; i++) {
-					if (counts[i] > max) {
-						max = counts[i];
-						max_i = i;
-					}
-				}
-				
-				int minor = max;
-				
-				mafAcc += ((double) minor / (major + minor));
-				mafCount ++;
 			}
 			
+			int max = 0;
+			int max_i = -1;
+			for (int i=0; i<counts.length; i++) {
+				if (counts[i] > max) {
+					max = counts[i];
+					max_i = i;
+				}
+			}
+			
+			int major = max;
+			counts[max_i] = 0;
+
+			max = 0;
+			max_i = 0;
+			for (int i=0; i<counts.length; i++) {
+				if (counts[i] > max) {
+					max = counts[i];
+					max_i = i;
+				}
+			}
+			
+			int minor = max;
+			
+			maf.add(((double) minor / (major + minor)));
 		}
 
 		int[] norm = listToArray(normalCounts);
@@ -403,12 +407,42 @@ public class PileupCopyNumber extends AbstractOutputCommand {
 			
 			double medianRatio = calcCopyRatio(norm, tumor, normalTotal, tumorTotal);
 			double copyNumber = calcCopyNumber(medianRatio);
+
+			double mafMean = calcMean(maf);
+			double mafStdev = calcStdev(maf, mafMean);
 			
-			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber, normMedian, tumorMedian, mafCount > 0 ? mafAcc / mafCount: 0);
+			return new CopyNumberRecord(chrom, start, end, medianRatio, copyNumber, normMedian, tumorMedian, mafMean, mafStdev);
 		}
 
 		return null;
 	}
+	
+	private double calcMean(List<Double> vals) {
+		double acc = 0.0;
+		double count = 0;
+		
+		for (Double val: vals) {
+			acc += val;
+			count++;
+		}
+		
+		return acc / count;
+	}
+
+	private double calcStdev(List<Double> vals, double mean) {
+		double acc = 0.0;
+		double count = 0;
+		
+		for (Double val: vals) {
+			acc += Math.pow((val - mean), 2);
+			count++;
+		}
+		
+		double tmp = acc / (count - 1);
+		
+		return Math.sqrt(tmp);
+	}
+
 	
 	private int[] listToArray(List<Integer> l) {
 		int[] out = new int[l.size()];
