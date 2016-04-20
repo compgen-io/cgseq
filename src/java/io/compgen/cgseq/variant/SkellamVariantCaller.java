@@ -111,7 +111,7 @@ public class SkellamVariantCaller implements VariantCaller {
 		
 		List<Pair<String, Integer>> sorted = counter.getSortedCounts();
 
-		if (sorted.size() < minDepth) {
+		if (rawDepth < minDepth) {
 			return null;
 		}
 		
