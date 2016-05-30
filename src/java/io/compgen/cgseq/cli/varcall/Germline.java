@@ -17,6 +17,7 @@ import io.compgen.cmdline.impl.AbstractOutputCommand;
 import io.compgen.common.IterUtils;
 import io.compgen.common.StringUtils;
 import io.compgen.common.TabWriter;
+import io.compgen.ngsutils.annotation.GenomeSpan;
 import io.compgen.ngsutils.pileup.BAMPileup;
 import io.compgen.ngsutils.pileup.PileupRecord;
 
@@ -33,8 +34,8 @@ public class Germline extends AbstractOutputCommand {
 	private int minBaseQual = 30;
 	private int minMappingQual = 10;
 
-	private int filterFlags = -1;
-    private int requiredFlags = -1;
+	private int filterFlags = 0;
+    private int requiredFlags = 0;
 
     private boolean disableBAQ = true;
     private boolean extendedBAQ = false;
@@ -42,10 +43,15 @@ public class Germline extends AbstractOutputCommand {
     
     private double expectedAlleleFrequency = 0.5;
     private boolean backgroundCorrect = true;
-    private int minCoverage = 10;
+    private int minDepth = 10;
     
-    private double minMinorStrandFreq = 0.05;
+    private String region = null;
     
+    @Option(desc="Region of the genome", name="region")
+    public void setRegion(String region) {
+    	this.region = region;
+    }
+
     @Option(desc="Filter flags", name="filter-flags")
     public void setFilterFlags(int filterFlags) {
     	this.filterFlags = filterFlags;
@@ -66,9 +72,9 @@ public class Germline extends AbstractOutputCommand {
     	this.backgroundCorrect = val;
     }
 
-    @Option(desc="Minimum coverage", name="mincoverage", defaultValue="10")
+    @Option(desc="Minimum total depth", name="min-depth", defaultValue="10")
     public void setMinCoverage(int minCoverage) {
-    	this.minCoverage = minCoverage;
+    	this.minDepth = minCoverage;
     }
 
     @Option(desc="Estimated allele frequency", name="allelefreq", defaultValue="0.5")
@@ -76,12 +82,12 @@ public class Germline extends AbstractOutputCommand {
     	this.expectedAlleleFrequency = estAlleleFreq;
     }
 
-    @Option(desc="Minimum base-quality score", name="basequal", defaultValue="30")
+    @Option(desc="Minimum base-quality score", name="min-basequal", defaultValue="30")
     public void setMinBaseQual(int minBaseQual) {
     	this.minBaseQual = minBaseQual;
     }
 
-    @Option(desc="Minimum alignment mapping score", name="mapqual", defaultValue="10")
+    @Option(desc="Minimum alignment mapping score (MAPQ)", name="min-mapq", defaultValue="10")
     public void setMinMapQual(int minMappingQual) {
     	this.minMappingQual = minMappingQual;
     }
@@ -140,7 +146,7 @@ public class Germline extends AbstractOutputCommand {
 //				##FORMAT=<ID=SP,Number=1,Type=Integer,Description="Phred-scaled strand bias P-value">
 //				##FORMAT=<ID=PL,Number=G,Type=Integer,Description="List of Phred-scaled genotype likelihoods">
 
-
+		
 		BAMPileup pileup = new BAMPileup(filename);
 		pileup.setDisableBAQ(disableBAQ);
 		pileup.setExtendedBAQ(extendedBAQ);
@@ -150,74 +156,111 @@ public class Germline extends AbstractOutputCommand {
 		pileup.setMinMappingQual(minMappingQual);
 		pileup.setRefFilename(refFilename);
 
+		SamReader bam = SamReaderFactory.makeDefault().open(new File(filename));
+		SAMFileHeader header = bam.getFileHeader();
+
+		GenomeSpan regionSpan = null;
+		if (region != null) {
+			if (region.indexOf(':') > -1) {
+				regionSpan = GenomeSpan.parse(region);
+			} else {
+				// this is just a raw chrom, we need to pull the length 
+				if (header.getSequence(region) != null) {
+					region = region+":1-"+header.getSequence(region).getSequenceLength();
+				}
+				regionSpan = GenomeSpan.parse(region);
+			}
+		}
+
+		
 		TabWriter writer = new TabWriter(out);
 		writer.write_line("##fileformat=VCFv4.1");
 		writer.write_line("##cgseqVersion="+CGSeq.getVersion());
 		writer.write_line("##cgseqCommand="+CGSeq.getArgs());
-		writer.write_line("##reference=file://"+new File(refFilename).getAbsolutePath());
-		writer.write_line("##pileupCommand="+StringUtils.join(" ", pileup.getCommand()));
+		writer.write_line("##reference=file://"+new File(refFilename).getCanonicalPath());
+		writer.write_line("##pileupCommand="+StringUtils.join(" ", pileup.getCommand(regionSpan)));
 
-		SamReader bam = SamReaderFactory.makeDefault().open(new File(filename));
-		SAMFileHeader header = bam.getFileHeader();
+		
 		for (SAMSequenceRecord rec: header.getSequenceDictionary().getSequences()) {
 			writer.write_line("##contig=<ID="+rec.getSequenceName()+",length="+rec.getSequenceLength()+">");
 		}
 		bam.close();
 
-		VariantCaller caller = new SkellamVariantCaller(backgroundCorrect, minBaseQual, minCoverage);
+		VariantCaller caller = new SkellamVariantCaller(backgroundCorrect, minBaseQual, minDepth, expectedAlleleFrequency, 1.0);
 
-		for (String k: caller.getInfoFields().keySet()) {
-			writer.write_line("##INFO=<ID="+k+","+caller.getInfoFields().get(k)+">");
+		for (String k: caller.getInfoFields()) {
+			writer.write_line("##INFO=<ID="+k+","+caller.getInfoFieldDescription(k)+">");
 		}
-		for (String k: caller.getFormatFields().keySet()) {
-			writer.write_line("##FORMAT=<ID="+k+","+caller.getFormatFields().get(k)+">");
+		for (String k: caller.getFormatFields()) {
+			writer.write_line("##FORMAT=<ID="+k+","+caller.getFormatFieldDescription(k)+">");
 		}
+		writer.write_line("##FORMAT=<ID=GT,Integer=R,Type=Integer,Description=\"Genotype call for each allele\">");
 		
 		writer.write("#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT", filename);
 		writer.eol();
 
 		
-		for (PileupRecord record: IterUtils.wrap(pileup.pileup())) {
-			if (record.getSampleRecords(0).coverage < minCoverage) {
+		for (PileupRecord record: IterUtils.wrap(pileup.pileup(regionSpan))) {
+			if (record.getSampleRecords(0).coverage < minDepth) {
 				continue;
 			}
 			
 			// Germline should be the first record
-			VariantResults varResult = caller.calcVariant(record.getSampleRecords(0).calls, record.ref);
+			VariantResults varResult = caller.calcVariant(record.getSampleRecords(0).calls, record.refBase);
 			
 			if (varResult == null) {
 				continue;
 			}
 
-			// Assume the following possible genotypes: REF:REF, REF:ALT, ALT:ALT (order: AA,AB,BB) - for a HET not including the REF base, the order is AA,AB,BB,AC,BC,CC, (ref:alt1:alt2 ?? )
-
-			String altCall = null;
-
-			if (varResult.minorCall == null) {
-				// homozygous major (not necessarily ref)
-				
+			if (onlyVariants && varResult.majorCall.equals(record.refBase) && varResult.minorCall == null) {
+				// only display variants ** and ** the call is homozygous for the ref. call
+				continue;				
 			}
 			
+			// Assume the following possible genotypes: REF:REF, REF:ALT, ALT:ALT (order: AA,AB,BB) - for a HET not including the REF base, the order is AA,AB,BB,AC,BC,CC, (ref:alt1:alt2 ?? )
+
+			String altCall1 = null;
+			String altCall2 = null;
+
+			if (varResult.majorCall.equals(record.refBase)) {
+				altCall1 = varResult.minorCall;
+			} else if (varResult.minorCall != null && varResult.minorCall.equals(record.refBase)) {
+				altCall1 = varResult.majorCall;
+			} else {
+				altCall1 = varResult.majorCall;
+				altCall2 = varResult.minorCall;
+			}
 			
 			writer.write(record.ref);
 			writer.write(record.pos+1);
 			writer.write("."); // dbsnp id
 			writer.write(record.refBase);
 			
-			if (altCall != null) {
-				writer.write(altCall);
+			if (altCall1 != null) {
+				if (altCall2 == null) {
+					writer.write(altCall1);
+				} else {
+					writer.write(altCall1+","+altCall2);
+				}
 			} else {
 				writer.write(".");
 			}
 
 			// qual is prob we are wrong (for either way...)
-			writer.write(varResult.getQual());
+			writer.write(toPhred(varResult.getQual()));
+			
+			writer.write("."); // FILTER
+			
 			
 			// info
 			List<String> info = new ArrayList<String>();
-			for (String k: caller.getInfoFields().keySet()) {
+			for (String k: caller.getInfoFields()) {
 				if (varResult.containsInfo(k)) {
-					info.add(k+"="+varResult.getInfo(k));
+					if (varResult.getInfo(k) != null) {
+						info.add(k+"="+varResult.getInfo(k));
+					} else {
+						info.add(k);
+					}
 				}
 			}
 			writer.write(StringUtils.join(";", info));
@@ -225,18 +268,33 @@ public class Germline extends AbstractOutputCommand {
 			
 			// format
 			List<String> format = new ArrayList<String>();
-			for (String k: caller.getFormatFields().keySet()) {
+			List<String> formatVals = new ArrayList<String>();
+
+			for (String k: caller.getFormatFields()) {
 				if (varResult.containsFormat(k)) {
-					format.add(k+"="+varResult.getFormat(k));
+					format.add(k);
+					formatVals.add(varResult.getFormat(k));
 				}
 			}
-			writer.write(StringUtils.join(";", format));
+			writer.write(StringUtils.join(":", format));
+			writer.write(StringUtils.join(":", formatVals));
 			writer.eol();
 		}
 		writer.close();
 	}
+
+	private String toPhred(Double qual) {
+		return toPhred(qual, -1);
+	}
 	
-	public int pvalueToPhred(double pval) {
-		return (int) (-10 * Math.log10(pval));
+	private String toPhred(Double qual, int max) {
+		if (qual == null) {
+			return ".";
+		}
+		int val = (int) (-10 * Math.log10(qual));
+		if (max != -1 && val > max) {
+			val = max;
+		}
+		return ""+ val;
 	}
 }

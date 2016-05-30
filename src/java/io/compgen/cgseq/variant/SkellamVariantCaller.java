@@ -3,14 +3,18 @@ package io.compgen.cgseq.variant;
 import io.compgen.cgseq.support.LRUCache;
 import io.compgen.cgseq.support.MapCount;
 import io.compgen.cgseq.support.Stats;
-import io.compgen.common.MapBuilder;
+import io.compgen.common.ListBuilder;
 import io.compgen.common.Pair;
+import io.compgen.common.StringUtils;
 import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCall;
 import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCallOp;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
+
+import org.apache.commons.math3.exception.MathIllegalArgumentException;
+import org.apache.commons.math3.stat.inference.MannWhitneyUTest;
 
 public class SkellamVariantCaller implements VariantCaller {
 	
@@ -74,6 +78,8 @@ public class SkellamVariantCaller implements VariantCaller {
 		}
 	}
 	
+	private final MannWhitneyUTest mwut = new MannWhitneyUTest();
+
 	private final boolean backgroundCorrection;
 	private final double expectedHeterozygousFrequency;
 	private final double expectedHomozygousFrequency;
@@ -81,6 +87,22 @@ public class SkellamVariantCaller implements VariantCaller {
 	private final int minDepth;
 	
 	private LRUCache<SkellamMemoKey, Double> cache = new LRUCache<SkellamMemoKey, Double>(10000);
+	private List<String> infoFields = Collections.unmodifiableList(new ListBuilder<String>()
+										.add("INDEL")
+										.add("DPR")
+										.list());
+	
+	private List<String> formatFields = Collections.unmodifiableList(new ListBuilder<String>()
+										.add("GT")
+										.add("DP")
+										.add("DP4")
+										.add("DV")
+										.add("BG")
+										.add("SB")
+										.add("RPB")
+										.add("MSF")
+										.add("DEBUG")
+										.list());
 	
 	public SkellamVariantCaller(boolean backgroundCorrection, int minQual, int minDepth, double expectedAlleleFrequency, double expectedHomozygousFrequency) {
 		this.backgroundCorrection = backgroundCorrection;
@@ -104,7 +126,9 @@ public class SkellamVariantCaller implements VariantCaller {
 		
 		for (PileupBaseCall call: calls) {
 			rawDepth++;
-			if (call.qual > minQual || call.op != PileupBaseCallOp.Match) {
+			
+			// mpileup doesn't report out indel quality scores, so we just accept them all.
+			if (call.qual > minQual || call.op == PileupBaseCallOp.Ins || call.op == PileupBaseCallOp.Del) {
 				counter.incr(call.toString());
 			}
 		}
@@ -114,10 +138,6 @@ public class SkellamVariantCaller implements VariantCaller {
 		if (rawDepth < minDepth) {
 			return null;
 		}
-		
-//		for (Pair<String, Integer> tup: sorted) {
-//			System.out.println(tup.one+"\t"+tup.two);
-//		}
 		
 		String majorCall = sorted.get(0).one; 
 		String minorCall = "";
@@ -143,47 +163,149 @@ public class SkellamVariantCaller implements VariantCaller {
 
 		int majorPlusStrandCount = plusCount(calls, majorCall);
 		int majorMinusStrandCount = major - majorPlusStrandCount;
-//		int majorStrandCount = majorPlusStrandCount < majorMinusStrandCount ? majorPlusStrandCount: majorMinusStrandCount;
-
-		int minorPlusStrandCount = plusCount(calls, minorCall);
-		int minorMinusStrandCount = minor - minorPlusStrandCount;
-//		int minorStrandCount = minorPlusStrandCount < minorMinusStrandCount ? minorPlusStrandCount: minorMinusStrandCount;
-
+		double majorMSF = (double) Math.min(majorPlusStrandCount, majorMinusStrandCount) / major;
+		double majorSB = getBinomialProb(Math.min(majorPlusStrandCount, majorMinusStrandCount), major, 0.5);
 		
+		int minorPlusStrandCount = 0;
+		int minorMinusStrandCount = 0;
+		double minorMSF = 0.0;
+		double minorSB = 0.0;
+		
+		if (minor > 0) {
+			minorPlusStrandCount = plusCount(calls, minorCall);
+			minorMinusStrandCount = minor - minorPlusStrandCount;
+			minorMSF = (double) Math.min(minorPlusStrandCount, minorMinusStrandCount) / minor;
+			minorSB = getBinomialProb(Math.min(minorPlusStrandCount, minorMinusStrandCount), minor, 0.5);
+		}
+
 		int diff = major - minor;
 		double hom = (major + minor) * expectedHomozygousFrequency;
 		double het = (major + minor) * expectedHeterozygousFrequency;
+
+		double probHom;
+		double probHet;
 		
-		double probHom = getSkellamProb(diff, hom, 1);
-		double probHet = getSkellamProb(diff, het, het);
+		double rpb = 0.0;
 		
-		VariantResults results;
-		if (probHom > probHet) {
-			results = new VariantResults(majorCall, null, rawDepth, probHom);
-		} else {
-			results = new VariantResults(majorCall, minorCall, rawDepth, probHet);
+		boolean pois = false; // did we use a Poisson test or the Skellam test.
+		
+		try {
+			probHom = getSkellamProb(diff, hom, 1); // probability of hom call assuming 1 alt-call (seq error).
+			probHet = getSkellamProb(diff, het, het);
+		} catch (MathIllegalArgumentException ex) {
+			// if the counts are too high, revert to a plain Poisson based test
+			
+			// probHom = Poisson(major; expected hom count)
+			// probHet = Poisson(minor; expected het count)
+
+			pois = true;
+			probHom = getPoissonProb(major, hom);
+			probHet = getPoissonProb(minor, het);
 		}
 		
+		if (probHom == 0.0 || probHet == 0.0) {
+			// if probHom or probHet is 0.0, that is an underflow in the BesselI function
+			// This means the difference between hom and het calls is great and the depth
+			// is also high.
+			// This should only happen for high depth bases (~300X) YMMV. And at this size, the 
+			// Skellam dist isn't as critical
+
+			// reverting to a plain Poisson based test
+
+			pois = true;
+			probHom = getPoissonProb(major, hom);
+			probHet = getPoissonProb(minor, het);
+			
+		}
+		
+		
+		VariantResults results;
+		
+		boolean isHet = false;
+		
+		if (probHet >= probHom && minor > 0) {
+			results = new VariantResults(majorCall, minorCall, rawDepth, probHom);
+			isHet = true;
+			if (majorCall.length() > 1 || minorCall.length()>1) {
+				results.addInfo("INDEL");
+			}
+
+			List<Integer> majorPos = getReadPos(calls, majorCall);
+			double[] majpos = new double[majorPos.size()];
+			for (int i=0; i<majpos.length; i++){
+				majpos[i] = majorPos.get(i);
+			}
+
+			List<Integer> minorPos = getReadPos(calls, minorCall);
+			double[] minpos = new double[minorPos.size()];
+			for (int i=0; i<minpos.length; i++){
+				minpos[i] = minorPos.get(i);
+			}
+			
+			rpb = mwut.mannWhitneyUTest(majpos, minpos);
+//			System.err.println("MWUT => "+StringUtils.join(",", majpos)+ " vs " + StringUtils.join(",", minpos) +" U= " + mwut.mannWhitneyU(majpos, minpos) +", p=" + rpb);
+			
+		} else {
+			results = new VariantResults(majorCall, null, rawDepth, probHet);
+			if (majorCall.length() > 1) {
+				results.addInfo("INDEL");
+			}
+		} 
+
+		results.addFormat("BG", bg);
+		
 		// high quality depth
-		results.addFormat("DP", ""+major+minor);
+		results.addFormat("DP", rawDepth);
+		
+		results.addFormat("DEBUG", majorCall+","+minorCall+","+ref+","+probHom+","+probHet+","+major+","+minor+(pois? ",pois":",skel"));
 		
 		// high quality non-reference bases
 		if (majorCall.equals(ref)) {
-			results.addFormat("DV", ""+minor);
-			results.addFormat("DP4", ""+majorPlusStrandCount+","+majorMinusStrandCount+","+minorPlusStrandCount+","+minorMinusStrandCount);
-			results.addInfo("DPR", major+","+minor);
-		} else if (minorCall.equals(ref)) {
-			results.addFormat("DV", ""+major);
-			results.addFormat("DP4", ""+minorPlusStrandCount+","+minorMinusStrandCount+","+majorPlusStrandCount+","+majorMinusStrandCount);
+			// major call is ref, minor call is alt
+ 			results.addFormat("DV", minor);
+ 			if (isHet) {
+ 				results.addInfo("DPR", major+","+minor);
+ 				results.addFormat("GT", "0/1");
+ 				results.addFormat("DP4", ""+majorPlusStrandCount+","+majorMinusStrandCount+","+minorPlusStrandCount+","+minorMinusStrandCount);
+ 				results.addFormat("MSF", majorMSF + "," + minorMSF);
+ 				results.addFormat("SB", majorSB +"," + minorSB);
+ 				results.addFormat("RPB", rpb);
+ 			} else {
+				results.addInfo("DPR", major);
+ 				results.addFormat("GT", "0/0");
+				results.addFormat("DP4", ""+majorPlusStrandCount+","+majorMinusStrandCount);
+ 				results.addFormat("MSF", majorMSF);
+ 				results.addFormat("SB", majorSB);
+			}
+		} else if (minorCall.equals(ref) || minorCall.equals("")) {
+			// minor call is ref, major call is alt
+			results.addFormat("DV", major);
+
+			// even though this isn't a het, we have to return the "minor" values for the ref allele
 			results.addInfo("DPR", minor+","+major);
+			results.addFormat("MSF", minorMSF + "," + majorMSF);
+			results.addFormat("DP4", ""+minorPlusStrandCount+","+minorMinusStrandCount+","+majorPlusStrandCount+","+majorMinusStrandCount);
+			results.addFormat("SB", minorSB +"," + majorSB);
+
+			if (isHet) {
+ 				results.addFormat("GT", "0/1");
+ 				results.addFormat("RPB", rpb);
+ 			} else {
+ 				results.addFormat("GT", "1/1");
+			}
 		} else {
-			results.addFormat("DV", ""+major+minor);
-			results.addFormat("DP4", "0,0,"+(majorPlusStrandCount+minorPlusStrandCount)+","+(majorMinusStrandCount+minorMinusStrandCount));
+			// het with two alt alleles
 			results.addInfo("DPR", "0,"+major+","+minor);
+			results.addFormat("GT", "1/2");
+			results.addFormat("DV", major+minor);
+			results.addFormat("DP4", "0,0,"+majorPlusStrandCount+","+majorMinusStrandCount+","+minorPlusStrandCount+","+minorMinusStrandCount);
+			results.addFormat("MSF", "0,"+majorMSF+","+minorMSF);
+			results.addFormat("SB", "0,"+majorSB +"," + minorSB);
+			results.addFormat("RPB", rpb);
 		}
 		
 		
-//		##INFO=<ID=INDEL,Number=0,Type=Flag,Description="Indicates that the variant is an INDEL.">
+		
 //		##INFO=<ID=IDV,Number=1,Type=Integer,Description="Maximum number of reads supporting an indel">
 //		##INFO=<ID=IMF,Number=1,Type=Float,Description="Maximum fraction of reads supporting an indel">
 
@@ -205,7 +327,36 @@ public class SkellamVariantCaller implements VariantCaller {
 		return results;
 
 	}
+
+	/**
+	 * 
+	 * @param k - count
+	 * @param mu - expected mean
+	 * @return
+	 */
+	private double getPoissonProb(int k, double mu) {
+		return Stats.poissonProb(k, mu);
+	}
+
+	/**
+	 * 
+	 * @param x - observed successes
+	 * @param n - number of trials
+	 * @param p - expected rate
+	 * @return
+	 */
+	private double getBinomialProb(int k, int n, double p) {
+		return Stats.binomialCumulativeProb(k, n, p);
+	}
+
 	
+	/**
+	 * 
+	 * @param k - observed difference between two Poisson values
+	 * @param mu1 - mean 1
+	 * @param mu2 - mean 2
+	 * @return
+	 */
 	private double getSkellamProb(int k, double mu1, double mu2) {
 		SkellamMemoKey memo = new SkellamMemoKey(k, mu1, mu2);
 		if (cache.containsKey(memo)) {
@@ -213,6 +364,9 @@ public class SkellamVariantCaller implements VariantCaller {
 		}
 
 		double val = Stats.skellam(k, mu1, mu2);
+		if (Double.isNaN(val)) {
+			val = 0.0;
+		}
 		cache.put(memo, val);
 		
 		return val;
@@ -221,10 +375,10 @@ public class SkellamVariantCaller implements VariantCaller {
 	private int plusCount(List<PileupBaseCall> calls, String call) {
 		int plus = 0;
 		for (PileupBaseCall pbc: calls) {
-			if (pbc.qual<minQual) {
+			if (pbc.qual<minQual && pbc.op == PileupBaseCallOp.Match) {
 				continue;
 			}
-			if (pbc.toString().equals(call)) {
+			if (pbc.matches(call)) {
 				if (pbc.plusStrand) {
 					plus++;
 				}
@@ -233,28 +387,13 @@ public class SkellamVariantCaller implements VariantCaller {
 		return plus;
 	}
 
-	private List<Integer> getReadPosStrand(List<PileupBaseCall> calls, String call, boolean plusStrand) {
-		List<Integer> readpos = new ArrayList<Integer>();
-		for (PileupBaseCall pbc: calls) {
-			if (pbc.qual<minQual) {
-				continue;
-			}
-			if (pbc.toString().equals(call)) {
-				if (pbc.plusStrand == plusStrand) {
-					readpos.add(pbc.readPos);
-				}
-			}
-		}
-		return readpos;
-	}
-
 	private List<Integer> getReadPos(List<PileupBaseCall> calls, String call) {
 		List<Integer> readpos = new ArrayList<Integer>();
 		for (PileupBaseCall pbc: calls) {
-			if (pbc.qual<minQual) {
+			if (pbc.qual<minQual && pbc.op == PileupBaseCallOp.Match) {
 				continue;
 			}
-			if (pbc.toString().equals(call)) {
+			if (pbc.matches(call)) {
 				readpos.add(pbc.readPos);
 			}
 		}
@@ -262,17 +401,46 @@ public class SkellamVariantCaller implements VariantCaller {
 	}
 
 	@Override
-	public Map<String, String> getInfoFields() {
-		return new MapBuilder<String, String>()
-				.put("DPR", "Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\"")
-				.build();
+	public List<String> getInfoFields() {
+		return infoFields;
 	}
 
 	@Override
-	public Map<String, String> getFormatFields() {
-		return new MapBuilder<String, String>()
-				.put("DP", "Number=1,Type=Integer,Description=\"# high-quality bases\"")
-				.put("DV", "Number=1,Type=Integer,Description=\"# high-quality non-reference bases\"")
-				.build();
+	public List<String> getFormatFields() {
+		return formatFields;
+	}
+
+	@Override
+	public String getInfoFieldDescription(String k) {
+		switch(k) {
+		case "INDEL":
+			return "Number=0,Type=Flag,Description=\"Variant is an IN-DEL.\">";
+		case "DPR":
+			return "Number=R,Type=Integer,Description=\"Number of high-quality bases observed for each allele\"";
+		}
+		return null;
+	}
+
+	@Override
+	public String getFormatFieldDescription(String k) {
+		switch(k) {
+		case "GT":
+			return "Number=1,Type=String,Description=\"Genotype calls\">";
+		case "DP4":
+			return "Number=4,Type=Integer,Description=\"Number of high-quality ref-fwd, ref-reverse, alt-fwd and alt-reverse bases (or alt1-fwd, alt1-rev, alt2-fwd, alt2-rev)\">";
+		case "DP":
+			return "Number=1,Type=Integer,Description=\"# high-quality bases (raw-depth)\"";
+		case "BG":
+			return "Number=1,Type=Integer,Description=\"Background calls\"";
+		case "DV":
+			return "Number=1,Type=Integer,Description=\"# high-quality non-reference bases\"";
+		case "SB":
+			return "Number=R,Type=Integer,Description=\"Strand-bias p-value for each allele (Binomial)\"";
+		case "RPB":
+			return "Number=R,Type=Integer,Description=\"Read position bias p-value (Mann-Whitney U Test)\"";
+		case "MSF":
+			return "Number=R,Type=Integer,Description=\"Minor strand frequency\"";
+		}
+		return null;
 	}
 }

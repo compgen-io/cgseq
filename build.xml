@@ -54,7 +54,7 @@
             <zipfileset src="${lib.dir}/compgen-cmdline-0.4.1.jar"/>
             <zipfileset src="${lib.dir}/ngsutilsj-0.3.jar"/>
             <zipfileset src="${lib.dir}/commons-compress-1.8.1.jar"/>
-            <zipfileset src="${lib.dir}/commons-math3-3.3.jar"/>
+            <zipfileset src="${lib.dir}/commons-math3-3.6.1.jar"/>
             <zipfileset src="${lib.dir}/htsjdk-1.126.jar"/>
 	        <fileset dir="${build.dir}/classes"/>
 	    	<zap pattern="*.java"/>
