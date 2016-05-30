@@ -1,7 +1,5 @@
 package io.compgen.cgseq.support;
 
-import io.compgen.common.StringUtils;
-
 import org.apache.commons.math3.analysis.UnivariateFunction;
 import org.apache.commons.math3.exception.ConvergenceException;
 import org.apache.commons.math3.exception.MathIllegalArgumentException;

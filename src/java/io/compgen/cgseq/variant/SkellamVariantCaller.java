@@ -5,7 +5,6 @@ import io.compgen.cgseq.support.MapCount;
 import io.compgen.cgseq.support.Stats;
 import io.compgen.common.ListBuilder;
 import io.compgen.common.Pair;
-import io.compgen.common.StringUtils;
 import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCall;
 import io.compgen.ngsutils.pileup.PileupRecord.PileupBaseCallOp;
 
