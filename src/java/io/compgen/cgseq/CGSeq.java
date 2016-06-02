@@ -1,6 +1,7 @@
 package io.compgen.cgseq;
 
 import io.compgen.cgseq.cli.copynumber.BreakpointFinder;
+import io.compgen.cgseq.cli.copynumber.BreakpointMerge;
 import io.compgen.cgseq.cli.copynumber.PileupCopyNumber;
 import io.compgen.cgseq.cli.genome.Mappability;
 import io.compgen.cgseq.cli.genome.MappabilityBamToCounts;
@@ -39,7 +40,6 @@ public class CGSeq {
 		.setHelpFooter("http://compgen.io/cgseq\n"+getVersion())
 		.addCommand(Help.class)
 		.addCommand(License.class)
-		.addCommand(BreakpointFinder.class)
 		.addCommand(PileupCopyNumber.class)
 		.addCommand(Discord.class)
 		.addCommand(Germline.class)
@@ -47,6 +47,8 @@ public class CGSeq {
 		.addCommand(SimuCall.class)
 		.addCommand(Mappability.class)
 		.addCommand(MappabilityBamToCounts.class)
+		.addCommand(BreakpointFinder.class)
+		.addCommand(BreakpointMerge.class)
 		.findAndRun(args);
 	}
 		

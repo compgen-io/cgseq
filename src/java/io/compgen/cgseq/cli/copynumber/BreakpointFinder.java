@@ -1,95 +1,110 @@
 package io.compgen.cgseq.cli.copynumber;
 
+import htsjdk.samtools.SAMFileHeader;
+import htsjdk.samtools.SAMSequenceRecord;
+import htsjdk.samtools.SamReader;
+import htsjdk.samtools.SamReaderFactory;
 import io.compgen.cgseq.CGSeq;
 import io.compgen.cmdline.annotation.Command;
 import io.compgen.cmdline.annotation.Exec;
 import io.compgen.cmdline.annotation.Option;
 import io.compgen.cmdline.annotation.UnnamedArg;
+import io.compgen.cmdline.exceptions.CommandArgumentException;
 import io.compgen.cmdline.impl.AbstractOutputCommand;
-import io.compgen.common.ListBuilder;
+import io.compgen.common.IterUtils;
 import io.compgen.common.StringUtils;
 import io.compgen.common.TabWriter;
-import io.compgen.ngsutils.pileup.PileupReader;
+import io.compgen.common.progress.ProgressMessage;
+import io.compgen.common.progress.ProgressStats;
+import io.compgen.common.progress.ProgressUtils;
+import io.compgen.ngsutils.annotation.GenomeSpan;
+import io.compgen.ngsutils.pileup.BAMPileup;
 import io.compgen.ngsutils.pileup.PileupRecord;
 
-import java.io.BufferedInputStream;
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.commons.math3.stat.regression.SimpleRegression;
-
-@Command(name="breakpoint", desc="Find likely breakpoints across a genome", category="copy-number")
+@Command(name="bp-dist", desc="Calculate somatic/germline distance across sliding windows", category="copy-number")
 public class BreakpointFinder extends AbstractOutputCommand {
 	
-	public class PileupCount{
-		public final String ref;
-		public final int pos;
-		public final int count;
+	public class BPWindowStats{
+		public final double dist;
+		public final int maxPos;
 		
-		public PileupCount(PileupRecord record) {
-			this.ref = record.ref;
-			this.pos = record.pos;
-			this.count = record.getSampleCount(0);			
-		}
-		public PileupCount(String ref, int pos, int count) {
-			this.ref = ref;
-			this.pos = pos;
-			this.count = count;
+		public BPWindowStats(double dist, int maxPos) {
+			this.dist = dist;
+			this.maxPos = maxPos;
 		}
 	}
 	
-	private String filename = "-";
+	private String germlineFname=null;
+	private String somaticFname=null;
+	
 	private int windowSize = 10000;
-	private int stepSize = 2000;
-	private double fractionIgnore = 0.1;
-	private double fractionRegression = 0.2;
+	private int stepSize = 2500;
 
 	private int minBaseQual = 13;
 	private int minMapQ = 0;
 	private boolean properPairs = false;
 
+	private int filterFlags = 0;
+    private int requiredFlags = 0;
+
+    private String region = null;
+    
+    @Option(desc="Only calculated breakpoints for this region", name="region", charName="R")
+    public void setRegion(String region) {
+    	this.region = region;
+    }
+
     @Option(desc="Only count properly-paired reads", name="paired")
     public void setProperPairs(boolean properPairs) {
     	this.properPairs = properPairs;
+    	this.requiredFlags |= 0x2;
     }
 
-    @Option(desc="Minimum base quality", name="min-basequal", defaultValue="13")
+    @Option(desc="Minimum base-quality score", name="min-basequal", defaultValue="30")
     public void setMinBaseQual(int minBaseQual) {
     	this.minBaseQual = minBaseQual;
     }
 
-    @Option(desc="Minimum read mapping quality (MAPQ)", name="min-mapq", defaultValue="0")
+    @Option(desc="Minimum alignment mapping score (MAPQ)", name="min-mapq", defaultValue="10")
     public void setMinMapQual(int minMapQ) {
     	this.minMapQ = minMapQ;
     }
-	
-    @Option(desc="Fraction of counts to ignore (0.0-1.0)", name="fraction-ignore", defaultValue="0.1")
-    public void setFractionIgnore(double fractionIgnore) {
-    	this.fractionIgnore = fractionIgnore;
-    }
 
-    @Option(desc="Fraction of counts to use in regression (0.0-1.0)", name="fraction-regression", defaultValue="0.2")
-    public void setFractionRegression(double fractionRegression) {
-    	this.fractionRegression = fractionRegression;
+    @Option(desc="Filter flags", name="filter-flags")
+    public void setFilterFlags(int filterFlags) {
+    	this.filterFlags = filterFlags;
     }
-
+    
+    @Option(desc="Required flags", name="required-flags")
+    public void setRequiredFlags(int requiredFlags) {
+    	this.requiredFlags = requiredFlags;
+    }
+    
     @Option(desc="Window size (bp)", name="window-size", defaultValue="10000")
     public void setWindowSize(int windowSize) {
     	this.windowSize = windowSize;
     }
 
-    @Option(desc="Step size (bp)", name="step-size", defaultValue="2000")
+    @Option(desc="Step size (bp)", name="step-size", defaultValue="5000")
     public void setStepSize(int stepSize) {
     	this.stepSize = stepSize;
     }
 
-    @UnnamedArg(name = "BAM")
-    public void setFilename(String filename) {
-        this.filename = filename;
+    @UnnamedArg(name = "GERMLINE SOMATIC")
+    public void setFilename(String[] filenames) throws CommandArgumentException {
+        if (filenames.length!=2) {
+        	throw new CommandArgumentException("You must specify both a germline and somatic sample");
+        }
+        
+        germlineFname = filenames[0];
+        somaticFname = filenames[1];
+        
     }
 
 	public BreakpointFinder() {
@@ -97,215 +112,212 @@ public class BreakpointFinder extends AbstractOutputCommand {
 
 
 	@Exec
-	public void exec() throws Exception {
+	public void exec() throws CommandArgumentException, IOException {
+		BAMPileup pileup = new BAMPileup(germlineFname, somaticFname);
+		pileup.setDisableBAQ(true);
+		pileup.setExtendedBAQ(false);
+		pileup.setFlagFilter(filterFlags);
+		pileup.setFlagRequired(requiredFlags);
+		pileup.setMinBaseQual(minBaseQual);
+		pileup.setMinMappingQual(minMapQ);
+
+		SamReader bam = SamReaderFactory.makeDefault().open(new File(germlineFname));
+		final SAMFileHeader header = bam.getFileHeader();
+
+		GenomeSpan regionSpan = null;
+		if (region != null) {
+			if (region.indexOf(':') > -1) {
+				regionSpan = GenomeSpan.parse(region);
+				if (header.getSequence(regionSpan.ref) == null) {
+					throw new CommandArgumentException("Region: "+ region+" not found in this BAM file!");
+				}
+
+			} else {
+				// this is just a raw chrom, we need to pull the length 
+				if (header.getSequence(region) == null) {
+					throw new CommandArgumentException("Region: "+ region+" not found in this BAM file!");
+				}
+				region = region+":1-"+header.getSequence(region).getSequenceLength();
+				regionSpan = GenomeSpan.parse(region);
+			}
+
+		}
+
+		final long totalGenomeSize;
+
+		if (regionSpan == null) {
+			long tmp = 0;
+			for (SAMSequenceRecord seq: header.getSequenceDictionary().getSequences()) {
+				tmp += seq.getSequenceLength();
+			}
+			totalGenomeSize = tmp;
+		} else {
+			totalGenomeSize = regionSpan.size();
+		}
+
+		
 		TabWriter writer = new TabWriter(out);
         writer.write_line("## program: " + CGSeq.getVersion());
         writer.write_line("## cmd: " + CGSeq.getArgs());
-        writer.write_line("## filename: " + filename);
+        writer.write_line("## germline: " + germlineFname);
+        writer.write_line("## somatic: " + somaticFname);
         writer.write_line("## min-mapq: " + minMapQ);
         writer.write_line("## min-base-qual: " + minBaseQual);
         writer.write_line("## proper-pairs: " + properPairs);
-		writer.write("chrom", "start", "end", "median", "slope", "intercept", "mse", "rsquared", "mse_median");
-		writer.eol();
+		writer.write_line("## pileupCommand="+StringUtils.join(" ", pileup.getCommand(regionSpan)));
 
-		ListBuilder<String> lb = new ListBuilder<String>("samtools", "mpileup");
-		if (minMapQ > -1) {
-			lb.add("-q", ""+minMapQ);
+		for (SAMSequenceRecord seq: header.getSequenceDictionary().getSequences()) {
+	        writer.write_line("## ref "+seq.getSequenceName()+" " + seq.getSequenceLength());
 		}
-		if (minBaseQual > -1) {
-			lb.add("-Q", ""+minBaseQual);
-		}
-		if (properPairs) {
-			lb.add("--rf", "2");
-		}
-		
-		lb.add(filename);
-		
-		ProcessBuilder pb = new ProcessBuilder(lb.list());
-		if (verbose) {
-			System.err.println(StringUtils.join(" ", pb.command()));
-		}
-		Process proc = pb.start();
-		InputStream bis = new BufferedInputStream(proc.getInputStream());
-		PileupReader reader = new PileupReader(bis);
 
+		
 		String currentChrom = null;
 		int curStart = 0;
 
-		List<PileupCount> buffer = new ArrayList<PileupCount>();
-		Iterator<PileupRecord> it = reader.iterator();
+		
+		final long[] progressPos = new long[] {0l,0l}; 
+ 		
+		final List<PileupRecord> buffer = new ArrayList<PileupRecord>();
+//		final Map<BPPos,Double> stats = new HashMap<BPPos, Double>();
 
-		PileupRecord record = null;
-		while (it.hasNext()) {
-			if (record == null) {
-				 record = it.next();
+		
+		Iterator<PileupRecord> it = ProgressUtils.getIterator(new File(germlineFname).getName()+" / " + new File(somaticFname).getName(), pileup.pileup(regionSpan), new ProgressStats(){
+			@Override
+			public long size() {
+				return totalGenomeSize;
 			}
-
+			@Override
+			public long position() {
+				return progressPos[0] + progressPos[1];
+			}}, 
+			
+			new ProgressMessage<PileupRecord>(){
+				@Override
+				public String msg(PileupRecord current) {
+						return current.ref+":"+current.pos;
+				}});
+		
+		
+		for (PileupRecord record: IterUtils.wrap(it)) {
 			if (currentChrom == null || !record.ref.equals(currentChrom)) {
-				if (currentChrom!=null) {
-					calculateRegression(buffer, writer, curStart, curStart + windowSize);
+				if (buffer.size() > 0) {
+					BPWindowStats diff = calcCumulativeDistance(buffer);
+//					stats.put(diff.pos, diff.dist);
+					writer.write(currentChrom);
+					writer.write(curStart);
+					writer.write(buffer.get(buffer.size()-1).pos);
+					writer.write(Double.isNaN(diff.dist) ? "":""+diff.dist);
+					writer.write(diff.maxPos < 0 ? "": ""+diff.maxPos);
+					writer.eol();
 					buffer.clear();
+					
+					progressPos[0] += header.getSequence(currentChrom).getSequenceLength();
+					progressPos[1] = 0;
+					
 				}
 				currentChrom = record.ref;
 				curStart = 0;
-
-			} else if (record.pos > curStart + windowSize) {
+			} 
+			if (record.pos > curStart + windowSize) {
 				if (buffer.size() > 0) {
-					calculateRegression(buffer, writer, curStart, curStart + windowSize);
+					BPWindowStats diff = calcCumulativeDistance(buffer);
+//					stats.put(diff.pos, diff.dist);
+					writer.write(currentChrom);
+					writer.write(curStart);
+					writer.write(curStart + windowSize);
+					writer.write(Double.isNaN(diff.dist) ? "":""+diff.dist);
+					writer.write(diff.maxPos < 0 ? "": ""+diff.maxPos);
+					writer.eol();
 				}
-
-				curStart = curStart + stepSize;
+				while (record.pos > curStart + windowSize) {
+					curStart += stepSize;
+				}
 				
 				while (buffer.size() > 0 && buffer.get(0).pos < curStart) {
 					buffer.remove(0);
 				}
-				
-			} else {
-				buffer.add(new PileupCount(record));
-				record = null;
 			}
+
+			buffer.add(record);
+			progressPos[1] = record.pos;
 		}
 
 		if (buffer.size() > 0) {
-			calculateRegression(buffer, writer, curStart, curStart + windowSize);
+			BPWindowStats diff = calcCumulativeDistance(buffer);
+//			stats.put(diff.pos, diff.dist);
+			writer.write(currentChrom);
+			writer.write(curStart);
+			writer.write(buffer.get(buffer.size()-1).pos);
+			writer.write(Double.isNaN(diff.dist) ? "":""+diff.dist);
+			writer.write(diff.maxPos < 0 ? "": ""+diff.maxPos);
+			writer.eol();
+			buffer.clear();
 		}
+		
+//		System.err.println("Calculating mean/stddev of all distances");
+//		double[] distances = new double[stats.size()];
+//		int i=0;
+//		for (Double d: stats.values()) {
+//			distances[i++] = d;
+//		}
+//		MeanStdDev msd = StatUtils.calcMeanStdDev(distances);
+//		System.err.println("Mean  : " + msd.mean);
+//		System.err.println("StdDev: " + msd.stddev);
+//		
+//		double thres = (msd.stddev*2) + msd.mean;
+//		System.err.println("Threshold (2-sigma): " + thres);
+//
+//		writer.write_line("#window-count: " + distances.length);
+//		writer.write_line("#mean: " + msd.mean);
+//		writer.write_line("#stddev: " + msd.stddev);
+//		writer.write_line("#threshold (2-sigma): " + thres);
+//
+//		writer.write("chrom", "pos", "cumulative_dist");
+//		writer.eol();
+//
+//		for (Entry<BPPos, Double> ev: stats.entrySet()) {
+//			if (ev.getValue() > thres) {
+//				writer.write(ev.getKey().chrom);
+//				writer.write(ev.getKey().pos);
+//				writer.eol();
+//			}
+//		}
 		
 		writer.close();
-		reader.close();
 	}
 	
-	private void calculateRegression(List<PileupCount> buffer, TabWriter writer, int start, int end) throws IOException {
-		int[] counts = new int[buffer.size()];
-		for (int i=0; i<counts.length; i++) {
-			counts[i] = buffer.get(i).count;
+	private BPWindowStats calcCumulativeDistance(List<PileupRecord> buffer) {
+		long germTotal = 0;
+		long somTotal = 0;
+
+		for (int i=0; i<buffer.size(); i++) {
+			germTotal += buffer.get(i).getSampleCount(0);
+			somTotal += buffer.get(i).getSampleCount(1);
 		}
-		
-        int skip = (int) (counts.length*fractionIgnore);
 
-//      int low = skip;
-//		int high = counts.length - skip;
-//		int quarterLow = ((mid-low) / 2) + low;
-//		int quarterhigh = ((high-mid) / 2) + mid;
+		double germAcc = 0.0;
+		double somAcc = 0.0;
 		
-		Arrays.sort(counts);
-		
-		// first quartile
-		
-		int mid = counts.length / 2;
-		int split = (int) (counts.length * fractionRegression * 0.5);
-		
-        SimpleRegression first = calcRegression(counts, mid-split, mid+split);
+		double diffAcc = 0.0;
+		double maxDiff = -1.0;
+		int maxPos = -1;
 
-		double mse = calculateMSE(first, counts, skip);
-		double rsquare = first.getRSquare();
-		double slope = first.getSlope();
-		double intercept = first.getIntercept();
-		int median = counts[(int) (counts.length*0.5)];
-		
-//		int quarter = 1;
-//
-//        double mse = calculateMSE(second, counts, skip);
-//        if (mse > worstMSE) {
-//    		worstMSE = mse;
-//    		rsquare = second.getRSquare();
-//    		slope = second.getSlope();
-//    		intercept = second.getIntercept();
-//    		quarter = 2;
-//        }
-//
-//        mse = calculateMSE(third, counts, skip);
-//        if (mse > worstMSE) {
-//    		worstMSE = mse;
-//    		rsquare = third.getRSquare();
-//    		slope = third.getSlope();
-//    		intercept = third.getIntercept();
-//    		quarter = 3;
-//        }
-//
-//        mse = calculateMSE(fourth, counts, skip);
-//        if (mse > worstMSE) {
-//    		worstMSE = mse;
-//    		rsquare = fourth.getRSquare();
-//    		slope = fourth.getSlope();
-//    		intercept = fourth.getIntercept();
-//    		quarter = 4;
-//        }
-        
-		writer.write(buffer.get(0).ref);
-		writer.write(start);
-		writer.write(end);
-		writer.write(median);
-		writer.write(slope);
-		writer.write(intercept);
-		writer.write(mse);
-		writer.write(rsquare);
-		writer.write(mse/median);
-		writer.eol();
+		for (int i=0; i<buffer.size(); i++) {
+			germAcc = buffer.get(i).getSampleCount(0);
+			somAcc = buffer.get(i).getSampleCount(1);
+			
+			double diff = Math.abs((germAcc/germTotal) - (somAcc/somTotal));
+			
+			if (diff > maxDiff) {
+				maxPos = buffer.get(i).pos;
+				maxDiff = diff;
+			}
+			
+			diffAcc += diff;
 
-        
-	}
-	
-	private SimpleRegression calcRegression(int[] counts, int low, int high) {
-		SimpleRegression reg = new SimpleRegression();
-        for (int i=low; i<high; i++) {
-            reg.addData(i,counts[i]);
-        }
-        return reg;
-	}
-	
-	private double calculateMSE(SimpleRegression reg, int[] counts, int skip) {
-		double acc = 0.0;
-		
-		for (int i=skip; i<counts.length-skip; i++) {
-			acc += Math.pow(reg.predict(i) - counts[i],2);
 		}
-		
-		return acc / counts.length;
+
+		return new BPWindowStats(diffAcc / buffer.size(), maxPos);
 	}
-	
-//
-//	private double calcCummulativeDistance(int[] ar) {
-//		int total = 0;
-//		for (int i=0; i<ar.length;i++) {
-//			total += ar[i];
-//		}
-//
-//		double step = 1.0 / ar.length;
-//		double idealAcc = 0.0;
-//		double sampleAcc = 0.0;
-//		
-//		double dist = 0.0;
-//		for (int i=0; i<ar.length;i++) {
-//			sampleAcc += ar[i];
-//			idealAcc += step;
-//			dist += Math.abs((sampleAcc/total) - idealAcc);
-//		}
-//
-//		return dist;
-//	}
-//
-//	private double calcTumorNormalDiff(int[] normal, int[] tumor) {
-//		int normalTotal = 0;
-//		int tumorTotal = 0;
-//
-//		for (int i=0; i<normal.length;i++) {
-//			normalTotal += normal[i];
-//			tumorTotal += tumor[i];
-//		}
-//
-//		double normalAcc = 0.0;
-//		double tumorAcc = 0.0;
-//		
-//		double diff = 0.0;
-//
-//		for (int i=0; i<normal.length;i++) {
-//			normalAcc += normal[i];
-//			tumorAcc += tumor[i];
-//			
-//			diff += Math.abs((normalAcc/normalTotal) - (tumorAcc/tumorTotal));
-//		}
-//
-//		return diff / normal.length;
-//	}
 
 }
